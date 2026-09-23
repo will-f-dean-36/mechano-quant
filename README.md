@@ -1,21 +1,55 @@
 # Fiji Cell Segmentation
 
-Fiji/ImageJ plugin for segmenting cells from RICM images, reviewing thresholds and ROIs interactively, measuring accepted ROIs, and saving masks, labels, overlays, ROIs, measurements, and run parameters.
+![Version](https://img.shields.io/badge/version-0.5.0--SNAPSHOT-green)
 
-The plugin is aimed at workflows where:
-- RICM images are used for segmentation
-- accepted ROIs are measured either on the same RICM image or on paired fluorescence images
-- the user may want to stop during thresholding or ROI review and adjust results interactively
+Fiji/ImageJ plugin for segmenting cells in RICM images. It can run fully automatically, but also provides interactive review points for adjusting thresholds and ROIs when the segmentation needs a human eye.
+
+The plugin supports:
+- measuring accepted ROIs in the source image or in a paired image, such as a fluorescence image of the same region
+- running on a single open image, an open stack, or many files in batch mode
+- several batch organization schemes, including separate RICM and fluorescence files, multi-series containers, and multi-channel images
 
 ## Status
 
 Early release (`0.x`), under active development.
 
-## Installation From a JAR
+## Installation
 
 ### Requirements
 
 - Fiji / ImageJ
+
+### Installation From the ImageJ Update Site
+
+### Update site steps
+
+1. In Fiji, choose `Help > Update...`.
+2. Click `Manage update sites`.
+3. Click `Add update site`.
+4. Enter:
+   - Name: `Cell Segmentation`
+   - URL: `https://sites.imagej.net/CellSegmentation/`
+5. Check the new `Cell Segmentation` update site.
+6. Click `Close`.
+7. Click `Apply changes`.
+8. Restart Fiji.
+
+After installation, Fiji can receive plugin updates through the normal updater.
+
+The plugin should appear under:
+
+```text
+Plugins > Cell Segmentation
+```
+
+Menu entries:
+
+```text
+Run on current image/stack...
+Run on multiple images...
+```
+
+### Installation From a JAR
 
 ### Install steps
 
@@ -108,8 +142,9 @@ For stack mode:
 - each slice is treated as a separate segmentation target
 - masks, labels, label overlays, measurements, and parameter rows are aggregated across slices
 
-Single-image mode does not require fluorescence images.
-Measurements are performed on the active image itself.
+In single-image mode, accepted ROIs are measured on the active image itself. After the run, you can use the saved ROI ZIP or the ROIs in Fiji's ROI Manager for any additional manual measurements.
+
+To automatically measure accepted ROIs on a separate paired image, such as a fluorescence image of the same region, use batch mode.
 
 ### Batch mode
 
@@ -200,6 +235,8 @@ The single-image dialog has two tabs:
   - `Yes`: run ImageJ watershed before ROI generation
   - `No`: skip watershed
 
+The dialog also includes `Restore Defaults`, which resets processing, review, measurement, and save settings to factory defaults while leaving selected files and output directories alone.
+
 ### Advanced tab
 
 The advanced tab groups review, display, measurement, and save options into sections.
@@ -228,12 +265,25 @@ If ROI review is enabled, the stop-point dialog supports:
 - `Delete ROIs`
   - draw through ROIs or place point markers inside them, then click `Delete`
 - `Undo`
+  - undo the most recent split, merge, delete, reset, or manual ROI Manager edit
 - `Redo`
+  - reapply the most recently undone ROI edit
 - `Reset`
+  - restore the ROI list to the ROIs originally proposed for this review step
+- `Redo thresholding`
+  - discard ROI review edits and return to threshold review for the same image or slice
 - `Continue`
+  - accept the current ROI list and continue processing
 - `Continue to end`
+  - accept the current ROI list and continue without showing more ROI review stops in this run
 - `Skip`
+  - skip the current image or slice without saving results for it
 - `Abort`
+  - stop the run
+
+When splitting ROIs:
+- if the drawn line overlaps multiple ROIs, the ROI containing the most sampled line points is split
+- split fragments smaller than `Min cell area (px)` are discarded
 
 For stacks, those review steps are applied slice-by-slice.
 
@@ -329,6 +379,8 @@ Same meaning as single-image mode:
 - `Exclude border-touching cells`
 - `Attempt to separate touching cells (watershed)`
 
+The dialog also includes `Restore Defaults`, which resets processing, review, measurement, and save settings to factory defaults while preserving selected input files and the output directory.
+
 ### Advanced tab
 
 The advanced tab groups review, measurement, and save options into sections.
@@ -346,7 +398,8 @@ Behavior notes:
 - `Continue to end` for threshold review only disables future threshold review stops
 - `Continue to end` for ROI review only disables future ROI review stops
 - these two review streams are independent
-- batch ROI review uses the same split, merge, delete, undo, redo, and reset tools as single-image mode
+- batch ROI review uses the same split, merge, delete, undo, redo, reset, and redo-thresholding tools as single-image mode
+- `Redo thresholding` during ROI review discards ROI edits for that review pass, returns to threshold review for the same RICM source, reruns segmentation, and then shows ROI review again
 
 #### Measurements
 
@@ -407,9 +460,20 @@ The parameter CSV records the segmentation settings actually used for each proce
 - ROI review action
 - accepted ROI count
 
+## Defaults
+
+Factory defaults include:
+- threshold review on
+- ROI review on
+- watershed off
+- dark-object segmentation
+- Sobel edge detection
+- minimum cell area of 500 px
+- all measurement toggles on
+
+Settings chosen in the custom dialogs are remembered between runs using Fiji preferences. `Restore Defaults` changes the visible dialog controls back to factory defaults; those values are saved as preferences only if the run is started from that dialog.
+
 ## Notes
 
-- The plugin is currently distributed as a JAR, not an update site.
-- Settings chosen in the custom dialogs are remembered between runs.
 - Batch file selections themselves are not persisted as defaults.
 - This is still a `0.x` project, so UI details and defaults may continue to evolve.
