@@ -1,6 +1,6 @@
 # Fiji Cell Segmentation
 
-![Version](https://img.shields.io/badge/version-0.5.0--SNAPSHOT-green)
+![Version](https://img.shields.io/badge/version-0.5.0-green)
 
 Fiji/ImageJ plugin for segmenting cells in RICM images. It can run fully automatically, but also provides interactive review points for adjusting thresholds and ROIs when the segmentation needs a human eye.
 
