@@ -389,6 +389,7 @@ public class CellSegmentationCommand implements Command {
                     final BatchStopController.RoiReviewResult reviewed = RoiReviewEditor.review(
                             sliceImp,
                             finalRois,
+                            minArea,
                             "ROI Review: " + title);
                     if (reviewed.isAbort()) {
                         closeSliceRunResult(runResult);

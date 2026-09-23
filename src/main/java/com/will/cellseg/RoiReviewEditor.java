@@ -48,6 +48,7 @@ public final class RoiReviewEditor {
     public static BatchStopController.RoiReviewResult review(
             final ImagePlus source,
             final Roi[] proposedRois,
+            final int minArea,
             final String title) {
 
         final CountDownLatch latch = new CountDownLatch(1);
@@ -59,7 +60,7 @@ public final class RoiReviewEditor {
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
-                final ReviewSession session = new ReviewSession(source, proposedRois, title);
+                final ReviewSession session = new ReviewSession(source, proposedRois, minArea, title);
 
                 final Runnable continueRun = new Runnable() {
                     @Override
@@ -133,11 +134,13 @@ public final class RoiReviewEditor {
         private final List<Roi[]> undoStack = new ArrayList<Roi[]>();
         private final List<Roi[]> redoStack = new ArrayList<Roi[]>();
         private final Roi[] initialRois;
+        private final int minArea;
         private Roi[] lastKnownRois;
         private Timer roiMonitor;
         private boolean applyingEditorEdit;
 
-        private ReviewSession(ImagePlus source, Roi[] proposedRois, String title) {
+        private ReviewSession(ImagePlus source, Roi[] proposedRois, int minArea, String title) {
+            this.minArea = Math.max(0, minArea);
             reviewImp = source != null ? source.duplicate() : null;
             if (reviewImp != null) {
                 reviewImp.setTitle(title);
@@ -344,7 +347,7 @@ public final class RoiReviewEditor {
                 if (lineOverlap == 0) {
                     continue;
                 }
-                final Roi[] parts = splitRoi(rois[i], lineRoi, width, height);
+                final Roi[] parts = splitRoi(rois[i], lineRoi, width, height, minArea);
                 if (parts.length < 2) {
                     continue;
                 }
@@ -558,7 +561,7 @@ public final class RoiReviewEditor {
         }
     }
 
-    private static Roi[] splitRoi(Roi areaRoi, Roi lineRoi, int width, int height) {
+    private static Roi[] splitRoi(Roi areaRoi, Roi lineRoi, int width, int height, int minArea) {
         final ImagePlus mask = IJ.createImage("ROI Split Mask", "8-bit black", width, height, 1);
         try {
             final ImageProcessor ip = mask.getProcessor();
@@ -571,7 +574,7 @@ public final class RoiReviewEditor {
             cutLine.drawPixels(ip);
             removeDiagonalOnlySplitContacts(ip, cutLine, width, height);
 
-            return componentsToRois(ip, width, height);
+            return componentsToRois(ip, width, height, minArea);
         } finally {
             mask.changes = false;
             mask.close();
@@ -859,7 +862,7 @@ public final class RoiReviewEditor {
         }
     }
 
-    private static Roi[] componentsToRois(ImageProcessor ip, int width, int height) {
+    private static Roi[] componentsToRois(ImageProcessor ip, int width, int height, int minArea) {
         final byte[] pix = (byte[]) ip.convertToByteProcessor().getPixels();
         final List<ConnectedComponents.Component> components =
                 ConnectedComponents.findForegroundComponents(pix, width, height, false);
@@ -872,6 +875,9 @@ public final class RoiReviewEditor {
         });
 
         for (ConnectedComponents.Component component : components) {
+            if (component.area() < minArea) {
+                continue;
+            }
             final Roi roi = componentToRoi(component, width, height);
             if (roi != null) {
                 areaRois.add(roi);

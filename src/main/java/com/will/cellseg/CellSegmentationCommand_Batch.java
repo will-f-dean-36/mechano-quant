@@ -818,6 +818,7 @@ public class CellSegmentationCommand_Batch implements Command {
         final BatchStopController.RoiReviewResult reviewed = RoiReviewEditor.review(
                 segImp,
                 proposedRois,
+                minArea,
                 buildRoiReviewTitle(pairIndex1, totalPairs, seg));
         if (reviewed.isAbort()) {
             return CachedSegmentationResult.abort();
