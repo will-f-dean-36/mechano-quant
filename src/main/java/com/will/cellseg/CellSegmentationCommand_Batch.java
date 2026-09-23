@@ -106,9 +106,9 @@ public class CellSegmentationCommand_Batch implements Command {
     @Parameter(visibility = ItemVisibility.INVISIBLE)
     private boolean allTimepoints = true;
 
-    private String thresholdStopMode = THRESHOLD_STOP_OFF;
+    private String thresholdStopMode = THRESHOLD_STOP_UNIQUE;
 
-    private String roiReviewMode = ROI_REVIEW_OFF;
+    private String roiReviewMode = ROI_REVIEW_ONCE;
 
     private File outputDir = CellSegmentationIO.getDefaultOutputDirectory();
 

@@ -58,7 +58,7 @@ public final class BatchStopController {
                     currentOrDefault.applyTo(ricmPreview);
                 }
                 if (ricmPreview.getWindow() == null) {
-                    ricmPreview.show();
+                    ReviewWindowUtils.showImageWindowCentered(ricmPreview);
                 }
                 if (ricmPreview.getWindow() != null) {
                     WindowManager.setCurrentWindow(ricmPreview.getWindow());
@@ -410,7 +410,7 @@ public final class BatchStopController {
             }
             reviewImage = updated;
             reviewImage.setTitle(title);
-            reviewImage.show();
+            ReviewWindowUtils.showImageWindowCentered(reviewImage);
             return reviewImage;
         }
 

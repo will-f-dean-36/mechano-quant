@@ -119,7 +119,7 @@ public final class CellSegmentationPipeline {
         // source image, so reset them to the actual gradient dynamic range.
         autoAdjustDisplayRange(work);
         if (show) {
-            work.show();
+            ReviewWindowUtils.showImageWindowCentered(work);
             if (work.getWindow() != null) {
                 WindowManager.setCurrentWindow(work.getWindow());
             }
@@ -399,8 +399,10 @@ public final class CellSegmentationPipeline {
         if (pauseThreshold) {
             // Needs an image window; if work wasn't shown, show it now.
             if (work.getWindow() == null) {
-                work.show();
-                if (work.getWindow() != null) WindowManager.setCurrentWindow(work.getWindow());
+                ReviewWindowUtils.showImageWindowCentered(work);
+                if (work.getWindow() != null) {
+                    WindowManager.setCurrentWindow(work.getWindow());
+                }
             }
 
             IJ.run(work, "Threshold...", "");

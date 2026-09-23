@@ -141,7 +141,7 @@ public final class RoiReviewEditor {
             reviewImp = source != null ? source.duplicate() : null;
             if (reviewImp != null) {
                 reviewImp.setTitle(title);
-                reviewImp.show();
+                ReviewWindowUtils.showImageWindowCentered(reviewImp);
                 if (reviewImp.getWindow() != null) {
                     WindowManager.setCurrentWindow(reviewImp.getWindow());
                 }

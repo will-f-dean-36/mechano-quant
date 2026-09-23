@@ -230,6 +230,11 @@ public final class BatchSegmentationDialog extends JDialog {
 
         final JPanel footer = new JPanel(new BorderLayout());
         footer.setBorder(BorderFactory.createEmptyBorder(0, 12, 10, 12));
+        final JButton restoreDefaults = new JButton("Restore Defaults");
+        restoreDefaults.addActionListener(e -> restoreFactoryDefaults());
+        final JPanel restoreButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        restoreButtons.add(restoreDefaults);
+        footer.add(restoreButtons, BorderLayout.WEST);
         footer.add(buttons, BorderLayout.EAST);
         add(footer, BorderLayout.SOUTH);
 
@@ -390,6 +395,37 @@ public final class BatchSegmentationDialog extends JDialog {
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION && chooser.getSelectedFile() != null) {
             outputDirField.setText(chooser.getSelectedFile().getAbsolutePath());
         }
+    }
+
+    private void restoreFactoryDefaults() {
+        thresholdMethodBox.setSelectedItem("Default");
+        objectPolarityBox.setSelectedItem("Dark");
+        edgeMethodBox.setSelectedItem("Sobel (Gradient)");
+        minAreaSpinner.setValue(500);
+        excludeBorderBox.setSelectedItem("No");
+        watershedBox.setSelectedItem("No");
+
+        thresholdReviewBox.setSelectedItem("Yes");
+        roiReviewBox.setSelectedItem("Yes");
+
+        measureAreaBox.setSelected(true);
+        measureMeanBox.setSelected(true);
+        measureMinMaxBox.setSelected(true);
+        measureStdDevBox.setSelected(true);
+        measurePerimeterBox.setSelected(true);
+        measureCentroidBox.setSelected(true);
+        measureRectBox.setSelected(true);
+        measureFeretBox.setSelected(true);
+        measureShapeBox.setSelected(true);
+        measureIntDenBox.setSelected(true);
+
+        labelsLutBox.setSelectedItem("Rainbow RGB");
+        saveMaskBox.setSelected(true);
+        saveLabelsBox.setSelected(true);
+        saveOverlayBox.setSelected(false);
+        saveRoisBox.setSelected(true);
+        saveMeasurementsBox.setSelected(true);
+        saveParametersBox.setSelected(true);
     }
 
     private void onRun() {

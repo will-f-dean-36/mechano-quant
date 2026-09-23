@@ -27,7 +27,7 @@ public class CellSegmentationCommand implements Command {
     private String thrMethod = "Default";
     private boolean darkObjects = true;
     private boolean thresholdReview = true;
-    private boolean roiReview = false;
+    private boolean roiReview = true;
     private boolean showSteps = false;
     private boolean showMask = false;
     private boolean showLabels = false;

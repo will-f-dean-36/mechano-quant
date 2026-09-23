@@ -180,6 +180,11 @@ public final class CellSegmentationDialog extends JDialog {
 
         final JPanel footer = new JPanel(new BorderLayout());
         footer.setBorder(BorderFactory.createEmptyBorder(0, 12, 10, 12));
+        final JButton restoreDefaults = new JButton("Restore Defaults");
+        restoreDefaults.addActionListener(e -> restoreFactoryDefaults());
+        final JPanel restoreButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        restoreButtons.add(restoreDefaults);
+        footer.add(restoreButtons, BorderLayout.WEST);
         footer.add(buttons, BorderLayout.EAST);
         add(footer, BorderLayout.SOUTH);
 
@@ -377,6 +382,46 @@ public final class CellSegmentationDialog extends JDialog {
         saveRoisBox.setEnabled(enabled);
         saveMeasurementsBox.setEnabled(enabled);
         saveParametersBox.setEnabled(enabled);
+    }
+
+    private void restoreFactoryDefaults() {
+        thresholdMethodBox.setSelectedItem("Default");
+        objectPolarityBox.setSelectedItem("Dark");
+        edgeMethodBox.setSelectedItem("Sobel (Gradient)");
+        minAreaSpinner.setValue(500);
+        excludeBorderBox.setSelectedItem("No");
+        watershedBox.setSelectedItem("No");
+
+        thresholdReviewBox.setSelectedItem("Yes");
+        roiReviewBox.setSelectedItem("Yes");
+
+        showStepsBox.setSelected(false);
+        showMaskBox.setSelected(false);
+        showLabelsBox.setSelected(false);
+        showRoiOverlayBox.setSelected(true);
+        showOverlayBox.setSelected(false);
+        labelsLutBox.setSelectedItem("Rainbow RGB");
+        clearRmBox.setSelected(true);
+
+        measureAreaBox.setSelected(true);
+        measureMeanBox.setSelected(true);
+        measureMinMaxBox.setSelected(true);
+        measureStdDevBox.setSelected(true);
+        measurePerimeterBox.setSelected(true);
+        measureCentroidBox.setSelected(true);
+        measureRectBox.setSelected(true);
+        measureFeretBox.setSelected(true);
+        measureShapeBox.setSelected(true);
+        measureIntDenBox.setSelected(true);
+
+        autoSaveBox.setSelected(false);
+        saveMaskBox.setSelected(true);
+        saveLabelsBox.setSelected(true);
+        saveOverlayBox.setSelected(false);
+        saveRoisBox.setSelected(true);
+        saveMeasurementsBox.setSelected(true);
+        saveParametersBox.setSelected(true);
+        updateSaveEnabled();
     }
 
     private void onRun() {
