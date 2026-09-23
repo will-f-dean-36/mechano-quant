@@ -320,115 +320,125 @@ public class CellSegmentationCommand implements Command {
         sliceImp.setTitle(title);
 
         try {
-            ThresholdConfig thresholdConfig = reviewState.sharedThresholdConfig;
-            ImagePlus preparedWork = null;
-            if (thresholdReview && !reviewState.thresholdReviewDisabled) {
-                final ImagePlus preview = CellSegmentationPipeline.prepareThresholdPreview(sliceImp, EdgeDetector.fromLabel(edgeMethod), true);
+            boolean forceThresholdReview = false;
+            while (true) {
+                ThresholdConfig thresholdConfig = reviewState.sharedThresholdConfig;
+                ImagePlus preparedWork = null;
+                final boolean thresholdReviewDisabledBeforeSelection = reviewState.thresholdReviewDisabled;
+                if ((thresholdReview && !reviewState.thresholdReviewDisabled) || forceThresholdReview) {
+                    final ImagePlus preview = CellSegmentationPipeline.prepareThresholdPreview(sliceImp, EdgeDetector.fromLabel(edgeMethod), true);
+                    try {
+                        preview.setTitle("Threshold Preview: " + title);
+                        final BatchStopController.ThresholdSelectionResult selected = stopController.maybeSelectThreshold(
+                                null,
+                                preview,
+                                reviewState.sharedThresholdConfig,
+                                "Threshold Review: " + title);
+                        if (selected.isAbort()) {
+                            return SliceProcessingResult.abort();
+                        }
+                        if (selected.isSkip()) {
+                            return SliceProcessingResult.skip();
+                        }
+                        thresholdConfig = selected.getConfig();
+                        if (selected.shouldRememberThreshold()) {
+                            reviewState.sharedThresholdConfig = thresholdConfig;
+                        } else {
+                            reviewState.sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
+                        }
+                        if (selected.isContinueToEnd()) {
+                            reviewState.thresholdReviewDisabled = true;
+                        }
+                        preparedWork = preview;
+                    } finally {
+                        if (preparedWork != preview) {
+                            closeImage(preview);
+                        }
+                    }
+                }
+
+                if (preparedWork == null) {
+                    preparedWork = CellSegmentationPipeline.prepareThresholdPreview(sliceImp, EdgeDetector.fromLabel(edgeMethod), false);
+                }
+
                 try {
-                    preview.setTitle("Threshold Preview: " + title);
-                    final BatchStopController.ThresholdSelectionResult selected = stopController.maybeSelectThreshold(
-                            null,
-                            preview,
-                            reviewState.sharedThresholdConfig,
-                            "Threshold Review: " + title);
-                    if (selected.isAbort()) {
-                        return SliceProcessingResult.abort();
-                    }
-                    if (selected.isSkip()) {
-                        return SliceProcessingResult.skip();
-                    }
-                    thresholdConfig = selected.getConfig();
-                    if (selected.shouldRememberThreshold()) {
-                        reviewState.sharedThresholdConfig = thresholdConfig;
-                    } else {
-                        reviewState.sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
-                    }
-                    if (selected.isContinueToEnd()) {
-                        reviewState.thresholdReviewDisabled = true;
-                    }
-                    preparedWork = preview;
-                } finally {
-                    if (preparedWork != preview) {
-                        closeImage(preview);
-                    }
-                }
-            }
-
-            if (preparedWork == null) {
-                preparedWork = CellSegmentationPipeline.prepareThresholdPreview(sliceImp, EdgeDetector.fromLabel(edgeMethod), false);
-            }
-
-            try {
-                final CellSegmentationParams params = new CellSegmentationParams(
-                        minArea,
-                        thrMethod,
-                        darkObjects,
-                        false,
-                        showSteps,
-                        false,
-                        false,
-                        false,
-                        excludeBorderTouching,
-                        watershed,
-                        EdgeDetector.fromLabel(edgeMethod),
-                        measurements,
-                        labelsLut,
-                        false,
-                        false
-                );
-
-                final CellSegmentationResult runResult = CellSegmentationPipeline.completeSegmentation(
-                        preparedWork,
-                        sliceImp,
-                        params,
-                        thresholdConfig);
-
-                Roi[] finalRois = runResult.roiManager != null ? cloneRois(runResult.roiManager.getRoisAsArray()) : new Roi[0];
-
-                if (roiReview && !reviewState.roiReviewDisabled) {
-                    final BatchStopController.RoiReviewResult reviewed = RoiReviewEditor.review(
-                            sliceImp,
-                            finalRois,
+                    final CellSegmentationParams params = new CellSegmentationParams(
                             minArea,
-                            "ROI Review: " + title);
-                    if (reviewed.isAbort()) {
-                        closeSliceRunResult(runResult);
-                        return SliceProcessingResult.abort();
-                    }
-                    if (reviewed.isSkip()) {
-                        closeSliceRunResult(runResult);
-                        return SliceProcessingResult.skip();
-                    }
-                    if (reviewed.isContinueToEnd()) {
-                        reviewState.roiReviewDisabled = true;
-                    }
-                    finalRois = reviewed.getRois();
-                }
+                            thrMethod,
+                            darkObjects,
+                            false,
+                            showSteps,
+                            false,
+                            false,
+                            false,
+                            excludeBorderTouching,
+                            watershed,
+                            EdgeDetector.fromLabel(edgeMethod),
+                            measurements,
+                            labelsLut,
+                            false,
+                            false
+                    );
 
-                final ImagePlus mask = CellSegmentationPipeline.buildMaskFromRois(finalRois, sliceImp.getWidth(), sliceImp.getHeight());
-                mask.setTitle("Cell Mask");
-                final ImagePlus labels = CellSegmentationPipeline.buildLabelsFromRois(finalRois, sliceImp.getWidth(), sliceImp.getHeight(), labelsLut);
-                labels.setTitle("Labels");
-                final ImagePlus labelOverlay = showLabelOverlay || saveLabelOverlayToFile
-                        ? CellSegmentationPipeline.createLabelOverlay(sliceImp, labels, labelsLut)
-                        : null;
-                if (labelOverlay != null) {
-                    labelOverlay.setTitle("LabelsOverlay");
-                }
-                final ResultsTable measured = measureRoisOnImage(finalRois, sliceImp, measurements);
-                annotateSliceColumn(measured, sliceIndex);
-                final ResultsTable parameterTable = buildParameterTable(
-                        imp,
-                        sliceIndex,
-                        1,
-                        thresholdConfig,
-                        finalRois.length);
+                    final CellSegmentationResult runResult = CellSegmentationPipeline.completeSegmentation(
+                            preparedWork,
+                            sliceImp,
+                            params,
+                            thresholdConfig);
 
-                closeSliceRunResult(runResult);
-                return new SliceProcessingResult(mask, labels, labelOverlay, finalRois, measured, parameterTable, false, false);
-            } finally {
-                if (preparedWork != null && preparedWork.getWindow() != null) {
-                    closeImage(preparedWork);
+                    Roi[] finalRois = runResult.roiManager != null ? cloneRois(runResult.roiManager.getRoisAsArray()) : new Roi[0];
+
+                    if (roiReview && !reviewState.roiReviewDisabled) {
+                        final BatchStopController.RoiReviewResult reviewed = RoiReviewEditor.review(
+                                sliceImp,
+                                finalRois,
+                                minArea,
+                                "ROI Review: " + title);
+                        if (reviewed.isRedoThreshold()) {
+                            closeSliceRunResult(runResult);
+                            reviewState.thresholdReviewDisabled = thresholdReviewDisabledBeforeSelection;
+                            forceThresholdReview = true;
+                            continue;
+                        }
+                        if (reviewed.isAbort()) {
+                            closeSliceRunResult(runResult);
+                            return SliceProcessingResult.abort();
+                        }
+                        if (reviewed.isSkip()) {
+                            closeSliceRunResult(runResult);
+                            return SliceProcessingResult.skip();
+                        }
+                        if (reviewed.isContinueToEnd()) {
+                            reviewState.roiReviewDisabled = true;
+                        }
+                        finalRois = reviewed.getRois();
+                    }
+
+                    final ImagePlus mask = CellSegmentationPipeline.buildMaskFromRois(finalRois, sliceImp.getWidth(), sliceImp.getHeight());
+                    mask.setTitle("Cell Mask");
+                    final ImagePlus labels = CellSegmentationPipeline.buildLabelsFromRois(finalRois, sliceImp.getWidth(), sliceImp.getHeight(), labelsLut);
+                    labels.setTitle("Labels");
+                    final ImagePlus labelOverlay = showLabelOverlay || saveLabelOverlayToFile
+                            ? CellSegmentationPipeline.createLabelOverlay(sliceImp, labels, labelsLut)
+                            : null;
+                    if (labelOverlay != null) {
+                        labelOverlay.setTitle("LabelsOverlay");
+                    }
+                    final ResultsTable measured = measureRoisOnImage(finalRois, sliceImp, measurements);
+                    annotateSliceColumn(measured, sliceIndex);
+                    final ResultsTable parameterTable = buildParameterTable(
+                            imp,
+                            sliceIndex,
+                            1,
+                            thresholdConfig,
+                            finalRois.length);
+
+                    closeSliceRunResult(runResult);
+                    return new SliceProcessingResult(mask, labels, labelOverlay, finalRois, measured, parameterTable, false, false);
+                } finally {
+                    if (preparedWork != null && preparedWork.getWindow() != null) {
+                        closeImage(preparedWork);
+                    }
                 }
             }
         } finally {

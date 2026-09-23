@@ -106,7 +106,18 @@ public final class RoiReviewEditor {
                     }
                 };
 
-                session.installCompletionActions(continueRun, continueToEndRun, skipRun, abortRun);
+                final Runnable redoThresholdRun = new Runnable() {
+                    @Override
+                    public void run() {
+                        if (completed.compareAndSet(false, true)) {
+                            result.set(BatchStopController.RoiReviewResult.redoThreshold());
+                            session.dispose();
+                            latch.countDown();
+                        }
+                    }
+                };
+
+                session.installCompletionActions(continueRun, continueToEndRun, redoThresholdRun, skipRun, abortRun);
                 session.show();
             }
         });
@@ -173,6 +184,7 @@ public final class RoiReviewEditor {
         private void installCompletionActions(
                 Runnable continueRun,
                 Runnable continueToEndRun,
+                Runnable redoThresholdRun,
                 Runnable skipRun,
                 Runnable abortRun) {
 
@@ -206,11 +218,13 @@ public final class RoiReviewEditor {
             continueButton.addActionListener(e -> continueRun.run());
             final JButton continueToEndButton = new JButton("Continue to end");
             continueToEndButton.addActionListener(e -> continueToEndRun.run());
+            final JButton redoThresholdButton = new JButton("Redo thresholding");
+            redoThresholdButton.addActionListener(e -> redoThresholdRun.run());
             final JButton skipButton = new JButton("Skip");
             skipButton.addActionListener(e -> skipRun.run());
             final JButton abortButton = new JButton("Abort");
             abortButton.addActionListener(e -> abortRun.run());
-            dialog.add(buttonPanel(continueButton, continueToEndButton, skipButton, abortButton), BorderLayout.SOUTH);
+            dialog.add(buttonPanel(continueButton, continueToEndButton, redoThresholdButton, skipButton, abortButton), BorderLayout.SOUTH);
             dialog.addWindowListener(new WindowAdapter() {
                 @Override
                 public void windowClosing(WindowEvent e) {

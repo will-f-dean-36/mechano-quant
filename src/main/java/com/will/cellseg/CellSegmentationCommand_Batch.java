@@ -296,6 +296,7 @@ public class CellSegmentationCommand_Batch implements Command {
             int skippedPairs = 0;
             final List<SegmentationParameterRow> parameterRows = new ArrayList<SegmentationParameterRow>();
 
+            pairLoop:
             for (int i = 0; i < pairedUnits.size(); i++) {
                 final PairedUnit pair = pairedUnits.get(i);
                 final SegUnit seg = pair.getSegUnit();
@@ -337,57 +338,75 @@ public class CellSegmentationCommand_Batch implements Command {
                     if (finalSegmentation == null) {
                         // Load exactly one segmentation plane per unique RICM: series + channel, Z=0, T=0.
                         segImp = reader.openPlane(seg.getSource(), seg.getSeriesIndex(), seg.getSegChannelIndex(), 0);
-                        final boolean stopForThreshold = shouldStopForThreshold(segKey, thresholdStopDisabled);
-                        final ThresholdSelection thresholdSelection = chooseThresholdConfig(
-                                stopController,
-                                segImp,
-                                segKey,
-                                sharedThresholdConfig,
-                                stopForThreshold,
-                                i + 1,
-                                pairedUnits.size(),
-                                seg);
+                        boolean forceThresholdReview = false;
+                        ThresholdConfig pairThresholdConfig = null;
+                        while (true) {
+                            if (forceThresholdReview) {
+                                thresholdConfigCache.remove(segKey);
+                            }
+                            final boolean thresholdStopDisabledBeforeSelection = thresholdStopDisabled;
+                            final boolean stopForThreshold = shouldStopForThreshold(segKey, thresholdStopDisabled) || forceThresholdReview;
+                            final ThresholdSelection thresholdSelection = chooseThresholdConfig(
+                                    stopController,
+                                    segImp,
+                                    segKey,
+                                    sharedThresholdConfig,
+                                    stopForThreshold,
+                                    i + 1,
+                                    pairedUnits.size(),
+                                    seg);
 
-                        if (thresholdSelection.isAbort()) {
-                            aborted = true;
-                            IJ.log("[CellSegmentation Batch] Aborted by user during threshold selection: " + segKey);
-                            segmentationCache.put(segKey, CachedSegmentationResult.abort());
+                            if (thresholdSelection.isAbort()) {
+                                aborted = true;
+                                IJ.log("[CellSegmentation Batch] Aborted by user during threshold selection: " + segKey);
+                                segmentationCache.put(segKey, CachedSegmentationResult.abort());
+                                break pairLoop;
+                            }
+                            if (thresholdSelection.isSkip()) {
+                                skippedPairs++;
+                                IJ.log("[CellSegmentation Batch] Skipping pair " + (i + 1) + " during threshold selection: " + segKey);
+                                segmentationCache.put(segKey, CachedSegmentationResult.skip());
+                                continue pairLoop;
+                            }
+
+                            pairThresholdConfig = thresholdSelection.getConfig();
+                            if (thresholdSelection.shouldRememberThreshold()) {
+                                sharedThresholdConfig = pairThresholdConfig;
+                            } else {
+                                sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
+                            }
+                            if (thresholdSelection.isContinueToEnd()) {
+                                thresholdStopDisabled = true;
+                            }
+
+                            // Segmentation always runs before ROI review; ROI review can then
+                            // accept, modify, reject, or send the user back to thresholding.
+                            final ImagePlus preparedWork = thresholdSelection.getPreparedWork();
+                            result = preparedWork != null
+                                    ? CellSegmentationPipeline.completeSegmentation(preparedWork, segImp, p, pairThresholdConfig)
+                                    : CellSegmentationPipeline.run(segImp, p, pairThresholdConfig);
+
+                            final Roi[] proposedRois = result.roiManager != null ? cloneRois(result.roiManager.getRoisAsArray()) : new Roi[0];
+                            finalSegmentation = resolveSegmentationResult(
+                                    stopController,
+                                    segKey,
+                                    segImp,
+                                    proposedRois,
+                                    roiReviewDisabled,
+                                    i + 1,
+                                    pairedUnits.size(),
+                                    seg);
+                            if (finalSegmentation.isRedoThreshold()) {
+                                IJ.log("[CellSegmentation Batch] Redo thresholding requested during ROI review: " + segKey);
+                                closeImage(result.mask);
+                                closeImage(result.labels);
+                                result = null;
+                                thresholdStopDisabled = thresholdStopDisabledBeforeSelection;
+                                forceThresholdReview = true;
+                                continue;
+                            }
                             break;
                         }
-                        if (thresholdSelection.isSkip()) {
-                            skippedPairs++;
-                            IJ.log("[CellSegmentation Batch] Skipping pair " + (i + 1) + " during threshold selection: " + segKey);
-                            segmentationCache.put(segKey, CachedSegmentationResult.skip());
-                            continue;
-                        }
-
-                        final ThresholdConfig pairThresholdConfig = thresholdSelection.getConfig();
-                        if (thresholdSelection.shouldRememberThreshold()) {
-                            sharedThresholdConfig = pairThresholdConfig;
-                        } else {
-                            sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
-                        }
-                        if (thresholdSelection.isContinueToEnd()) {
-                            thresholdStopDisabled = true;
-                        }
-
-                        // Segmentation always runs before ROI review; ROI review can then
-                        // accept, modify, or reject the proposed ROI set.
-                        final ImagePlus preparedWork = thresholdSelection.getPreparedWork();
-                        result = preparedWork != null
-                                ? CellSegmentationPipeline.completeSegmentation(preparedWork, segImp, p, pairThresholdConfig)
-                                : CellSegmentationPipeline.run(segImp, p, pairThresholdConfig);
-
-                        final Roi[] proposedRois = result.roiManager != null ? cloneRois(result.roiManager.getRoisAsArray()) : new Roi[0];
-                        finalSegmentation = resolveSegmentationResult(
-                                stopController,
-                                segKey,
-                                segImp,
-                                proposedRois,
-                                roiReviewDisabled,
-                                i + 1,
-                                pairedUnits.size(),
-                                seg);
                         segmentationCache.put(segKey, finalSegmentation);
                         if (saveParameters) {
                             parameterRows.add(SegmentationParameterRow.from(
@@ -823,6 +842,9 @@ public class CellSegmentationCommand_Batch implements Command {
         if (reviewed.isAbort()) {
             return CachedSegmentationResult.abort();
         }
+        if (reviewed.isRedoThreshold()) {
+            return CachedSegmentationResult.redoThreshold();
+        }
         if (reviewed.isSkip()) {
             return CachedSegmentationResult.skip();
         }
@@ -933,12 +955,20 @@ public class CellSegmentationCommand_Batch implements Command {
             return new CachedSegmentationResult(BatchStopController.RoiReviewAction.ABORT, null);
         }
 
+        private static CachedSegmentationResult redoThreshold() {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.REDO_THRESHOLD, null);
+        }
+
         private boolean isSkip() {
             return action == BatchStopController.RoiReviewAction.SKIP;
         }
 
         private boolean isAbort() {
             return action == BatchStopController.RoiReviewAction.ABORT;
+        }
+
+        private boolean isRedoThreshold() {
+            return action == BatchStopController.RoiReviewAction.REDO_THRESHOLD;
         }
 
         private boolean isContinueToEnd() {

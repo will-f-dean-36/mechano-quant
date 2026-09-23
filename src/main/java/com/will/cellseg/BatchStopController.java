@@ -483,6 +483,10 @@ public final class BatchStopController {
             return new RoiReviewResult(RoiReviewAction.ABORT, null);
         }
 
+        public static RoiReviewResult redoThreshold() {
+            return new RoiReviewResult(RoiReviewAction.REDO_THRESHOLD, null);
+        }
+
         public RoiReviewAction getAction() {
             return action;
         }
@@ -501,6 +505,10 @@ public final class BatchStopController {
 
         public boolean isAbort() {
             return action == RoiReviewAction.ABORT;
+        }
+
+        public boolean isRedoThreshold() {
+            return action == RoiReviewAction.REDO_THRESHOLD;
         }
 
         public Roi[] getRois() {
@@ -567,6 +575,7 @@ public final class BatchStopController {
     public enum RoiReviewAction {
         CONTINUE,
         CONTINUE_TO_END,
+        REDO_THRESHOLD,
         SKIP,
         ABORT
     }
