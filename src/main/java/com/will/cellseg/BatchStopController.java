@@ -140,7 +140,7 @@ public final class BatchStopController {
                 dialog.pack();
                 dialog.setSize(new Dimension(Math.max(380, dialog.getWidth()), Math.max(150, dialog.getHeight())));
                 positionDialogNearImage(dialog, ricmPreview, true);
-                positionWindowBelowDialog(findThresholdWindow(), dialog);
+                positionWindowBelowDialog(ReviewWindowUtils.findThresholdWindow(), dialog);
                 dialog.setVisible(true);
             }
         });
@@ -180,6 +180,8 @@ public final class BatchStopController {
                 }
                 final ImagePlus reviewImp = updateReviewImage(imp, title);
                 if (reviewImp != null) {
+                    positionReviewRoiManager(roiManager, reviewImp);
+                    roiManager.setVisible(true);
                     roiManager.runCommand(reviewImp, "Show All with labels");
                     if (reviewImp.getWindow() != null) {
                         WindowManager.setCurrentWindow(reviewImp.getWindow());
@@ -263,10 +265,10 @@ public final class BatchStopController {
                         continueRun.run();
                     }
                 });
-                dialog.pack();
-                dialog.setSize(new Dimension(Math.max(380, dialog.getWidth()), Math.max(150, dialog.getHeight())));
-                positionDialogNearImage(dialog, reviewImp, false);
-                positionWindowBelowDialog(roiManager, dialog);
+                final Dimension preferred = dialog.getPreferredSize();
+                dialog.setSize(new Dimension(Math.max(380, preferred.width), Math.max(150, preferred.height)));
+                dialog.validate();
+                positionDialogNearImage(dialog, reviewImp, true);
                 dialog.setVisible(true);
             }
         });
@@ -290,6 +292,7 @@ public final class BatchStopController {
     private static JDialog createDialog(String title, String message, boolean alwaysOnTop) {
         final Frame owner = IJ.getInstance();
         final JDialog dialog = new JDialog(owner, title, false);
+        dialog.setLocationByPlatform(false);
         dialog.setLayout(new BorderLayout(8, 8));
         // HTML text is the simplest way to get multi-line centered text in a Swing label.
         final JLabel label = new JLabel("<html><div style='text-align:center;'>" + message + "</div></html>", SwingConstants.CENTER);
@@ -326,27 +329,6 @@ public final class BatchStopController {
         final int x = bounds.x + Math.max(0, (bounds.width - dialog.getWidth()) / 2);
         final int y = bounds.y + Math.max(0, (bounds.height - dialog.getHeight()) / 2);
         dialog.setLocation(x, y);
-    }
-
-    private static Window findThresholdWindow() {
-        final Window[] windows = WindowManager.getAllNonImageWindows();
-        if (windows == null) {
-            return null;
-        }
-        for (Window window : windows) {
-            if (window == null || !window.isVisible()) {
-                continue;
-            }
-            final String title = window instanceof Frame ? ((Frame) window).getTitle() : "";
-            if (title != null && title.toLowerCase().contains("threshold")) {
-                return window;
-            }
-            final String className = window.getClass().getName().toLowerCase();
-            if (className.contains("threshold")) {
-                return window;
-            }
-        }
-        return null;
     }
 
     private static void positionWindowBelowDialog(Window window, JDialog dialog) {
@@ -435,6 +417,10 @@ public final class BatchStopController {
     }
 
     private static void positionReviewRoiManager(RoiManager roiManager) {
+        positionReviewRoiManager(roiManager, null);
+    }
+
+    private static void positionReviewRoiManager(RoiManager roiManager, ImagePlus image) {
         if (roiManager == null) {
             return;
         }
@@ -445,8 +431,19 @@ public final class BatchStopController {
         final int centerX = bounds.x + bounds.width / 2;
         final int centerY = bounds.y + bounds.height / 2;
         final int gap = 260;
-        final int x = Math.max(bounds.x, centerX - gap - width);
-        final int y = Math.max(bounds.y, centerY - height / 2);
+        int x = centerX - gap - width;
+        int y = centerY - height / 2;
+        if (image != null && image.getWindow() != null) {
+            final Window imageWindow = image.getWindow();
+            final int imageGap = 16;
+            x = imageWindow.getX() - width - imageGap;
+            if (x < bounds.x) {
+                x = imageWindow.getX() + imageWindow.getWidth() + imageGap;
+            }
+            y = imageWindow.getY();
+        }
+        x = Math.max(bounds.x, Math.min(x, bounds.x + bounds.width - width));
+        y = Math.max(bounds.y, Math.min(y, bounds.y + bounds.height - height));
         roiManager.setLocation(x, y);
     }
 

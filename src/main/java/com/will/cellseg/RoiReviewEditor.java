@@ -149,8 +149,8 @@ public final class RoiReviewEditor {
 
             roiManager = new RoiManager();
             roiManager.setVisible(true);
-            positionRoiManager(roiManager);
             loadInitialRois(cloneRois(proposedRois));
+            positionRoiManager(roiManager, reviewImp);
             initialRois = cloneRois(roiManager.getRoisAsArray());
             lastKnownRois = cloneRois(roiManager.getRoisAsArray());
             startRoiMonitor();
@@ -214,10 +214,10 @@ public final class RoiReviewEditor {
                     continueRun.run();
                 }
             });
-            dialog.pack();
-            dialog.setSize(new Dimension(Math.max(430, dialog.getWidth()), Math.max(260, dialog.getHeight())));
+            final Dimension preferred = dialog.getPreferredSize();
+            dialog.setSize(new Dimension(Math.max(430, preferred.width), Math.max(260, preferred.height)));
+            dialog.validate();
             positionDialogNearImage(dialog, reviewImp);
-            positionWindowBelowDialog(roiManager, dialog);
         }
 
         private void deleteMarked() {
@@ -955,6 +955,7 @@ public final class RoiReviewEditor {
     private static JDialog createDialog(String title) {
         final Frame owner = IJ.getInstance();
         final JDialog dialog = new JDialog(owner, title, false);
+        dialog.setLocationByPlatform(false);
         dialog.setLayout(new BorderLayout(8, 8));
         dialog.setAlwaysOnTop(true);
         return dialog;
@@ -982,9 +983,9 @@ public final class RoiReviewEditor {
         if (image != null && image.getWindow() != null) {
             final Window imageWindow = image.getWindow();
             final int gap = 16;
-            int x = imageWindow.getX() - dialog.getWidth() - gap;
+            int x = imageWindow.getX() + imageWindow.getWidth() + gap;
             if (x < bounds.x || x + dialog.getWidth() > bounds.x + bounds.width) {
-                x = imageWindow.getX() + imageWindow.getWidth() + gap;
+                x = imageWindow.getX() - dialog.getWidth() - gap;
             }
             if (x + dialog.getWidth() <= bounds.x + bounds.width) {
                 final int y = Math.max(bounds.y, Math.min(imageWindow.getY(),
@@ -1019,6 +1020,10 @@ public final class RoiReviewEditor {
     }
 
     private static void positionRoiManager(RoiManager roiManager) {
+        positionRoiManager(roiManager, null);
+    }
+
+    private static void positionRoiManager(RoiManager roiManager, ImagePlus image) {
         if (roiManager == null) {
             return;
         }
@@ -1026,8 +1031,19 @@ public final class RoiReviewEditor {
         final Dimension size = roiManager.getSize();
         final int width = Math.max(size.width, 220);
         final int height = Math.max(size.height, 320);
-        final int x = Math.max(bounds.x, bounds.x + bounds.width - width - 32);
-        final int y = bounds.y + Math.max(0, (bounds.height - height) / 2);
+        int x = bounds.x + bounds.width - width - 32;
+        int y = bounds.y + Math.max(0, (bounds.height - height) / 2);
+        if (image != null && image.getWindow() != null) {
+            final Window imageWindow = image.getWindow();
+            final int gap = 16;
+            x = imageWindow.getX() - width - gap;
+            if (x < bounds.x) {
+                x = imageWindow.getX() + imageWindow.getWidth() + gap;
+            }
+            y = imageWindow.getY();
+        }
+        x = Math.max(bounds.x, Math.min(x, bounds.x + bounds.width - width));
+        y = Math.max(bounds.y, Math.min(y, bounds.y + bounds.height - height));
         roiManager.setLocation(x, y);
     }
 }
