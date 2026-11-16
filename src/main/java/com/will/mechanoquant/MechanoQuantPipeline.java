@@ -1,0 +1,884 @@
+package com.will.mechanoquant;
+
+import ij.IJ;
+import ij.ImagePlus;
+import ij.WindowManager;
+import ij.gui.PolygonRoi;
+import ij.gui.Roi;
+import ij.gui.Wand;
+import ij.CompositeImage;
+import ij.measure.ResultsTable;
+import ij.plugin.Duplicator;
+import ij.plugin.filter.Analyzer;
+import ij.plugin.frame.RoiManager;
+import ij.process.FloatProcessor;
+import ij.process.ImageProcessor;
+import ij.process.ImageConverter;
+import ij.process.ColorProcessor;
+import ij.process.ShortProcessor;
+import ij.ImageStack;
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.Frame;
+import java.awt.GraphicsEnvironment;
+import java.awt.Polygon;
+import java.awt.Rectangle;
+import java.awt.Window;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import ij.process.ByteProcessor;
+import javax.swing.JButton;
+import javax.swing.JDialog;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import javax.swing.SwingConstants;
+import javax.swing.border.EmptyBorder;
+public final class MechanoQuantPipeline {
+
+    private MechanoQuantPipeline() {}
+
+    private static final float[] SOBEL_X = {
+            -1, 0, 1,
+            -2, 0, 2,
+            -1, 0, 1
+    };
+    private static final float[] SOBEL_Y = {
+            -1, -2, -1,
+             0,  0,  0,
+             1,  2,  1
+    };
+    private static final float[] PREWITT_X = {
+            -1, 0, 1,
+            -1, 0, 1,
+            -1, 0, 1
+    };
+    private static final float[] PREWITT_Y = {
+            -1, -1, -1,
+             0,  0,  0,
+             1,  1,  1
+    };
+    private static final float[] SCHARR_X = {
+            -3, 0, 3,
+            -10, 0, 10,
+            -3, 0, 3
+    };
+    private static final float[] SCHARR_Y = {
+            -3, -10, -3,
+             0,   0,  0,
+             3,  10,  3
+    };
+    private static final float[] LAPLACIAN_3X3 = {
+             0, -1,  0,
+            -1,  4, -1,
+             0, -1,  0
+    };
+
+    public static MechanoQuantResult run(ImagePlus imp, MechanoQuantParams p) {
+        // The simple entry point derives a reusable threshold config from the command
+        // parameters, then delegates to the more general overload used by batch mode.
+        return run(imp, p, ThresholdConfig.auto(p.thrMethod, p.darkObjects));
+    }
+
+    public static MechanoQuantResult run(ImagePlus imp, MechanoQuantParams p, ThresholdConfig thresholdConfig) {
+        if (imp == null) {
+            IJ.noImage();
+            return new MechanoQuantResult(null, null, 0, null, null);
+        }
+
+        // Threshold preview and segmentation are done on a duplicate so the source image
+        // stays untouched and can still be used for intensity measurements.
+        // Show work image only if threshold UI needs a window, or if user wants steps.
+        final boolean showWork = p.pauseThreshold || p.showSteps;
+
+        // Work on a duplicate so the original image stays untouched.
+        ImagePlus work = prepareThresholdPreview(imp, p.edgeDetector, showWork);
+
+        // Capture gradient *now*, but do not show it yet (avoid breaking threshold pause)
+        ImagePlus gradientSnap = null;
+        if (p.showSteps) {
+            gradientSnap = work.duplicate();
+            gradientSnap.setTitle("1 - Gradient");
+        }
+
+        return completeSegmentation(work, imp, p, thresholdConfig, gradientSnap, p.pauseThreshold);
+    }
+
+    public static ImagePlus prepareThresholdPreview(ImagePlus imp, EdgeDetector edgeDetector, boolean show) {
+        // Batch mode uses this to stop after edge detection but before thresholding.
+        // That mirrors the same logical stop-point used in the interactive pipeline.
+        ImagePlus work = duplicateForProcessing(imp);
+        applyEdgeDetector(work, edgeDetector);
+        normalizeToUnitRange(work);
+        // Gradient images often start with stale display limits inherited from the
+        // source image, so reset them to the actual gradient dynamic range.
+        autoAdjustDisplayRange(work);
+        if (show) {
+            ReviewWindowUtils.showImageWindowCentered(work);
+            if (work.getWindow() != null) {
+                WindowManager.setCurrentWindow(work.getWindow());
+            }
+        }
+        return work;
+    }
+
+    public static MechanoQuantResult completeSegmentation(
+            ImagePlus preparedWork,
+            ImagePlus original,
+            MechanoQuantParams p,
+            ThresholdConfig thresholdConfig) {
+        return completeSegmentation(preparedWork, original, p, thresholdConfig, null, false);
+    }
+
+    public static ThresholdConfig captureThresholdConfig(ImagePlus work, ThresholdConfig fallback) {
+        // ImageJ stores threshold state on the ImageProcessor, so we read it back from
+        // the preview image after the user adjusts the Threshold window.
+        if (work == null || work.getProcessor() == null) {
+            return fallback;
+        }
+
+        final double minThreshold = work.getProcessor().getMinThreshold();
+        final double maxThreshold = work.getProcessor().getMaxThreshold();
+        if (minThreshold == ImageProcessor.NO_THRESHOLD || maxThreshold == ImageProcessor.NO_THRESHOLD) {
+            return fallback;
+        }
+
+        final ThresholdConfig base = fallback != null ? fallback : ThresholdConfig.auto("Default", true);
+        return ThresholdConfig.manual(base.getMethod(), base.isDarkObjects(), minThreshold, maxThreshold);
+    }
+
+    public static ImagePlus buildMaskFromRois(Roi[] rois, int w, int h) {
+        // When ROI review changes the accepted shapes, batch mode regenerates the mask
+        // and labels from the final ROI set instead of re-running segmentation.
+        ImagePlus mask = IJ.createImage("Cell Mask", "8-bit black", w, h, 1);
+        ImageProcessor ip = mask.getProcessor();
+        if (rois != null) {
+            ip.setValue(255);
+            for (Roi roi : rois) {
+                if (roi != null) {
+                    ip.fill(roi);
+                }
+            }
+        }
+        return mask;
+    }
+
+    public static ImagePlus buildLabelsFromRois(Roi[] rois, int w, int h, String labelsLut) {
+        ImagePlus labels = buildLabelsFromRoisArray(rois, w, h);
+        labels.setTitle("Labels");
+        try {
+            applyLabelsLut(labels, labelsLut);
+            IJ.run(labels, "Enhance Contrast", "saturated=0");
+        } catch (Throwable ignored) { }
+        return labels;
+    }
+
+    private static MechanoQuantResult completeSegmentation(
+            ImagePlus work,
+            ImagePlus imp,
+            MechanoQuantParams p,
+            ThresholdConfig thresholdConfig,
+            ImagePlus gradientSnap,
+            boolean pauseThreshold) {
+
+        // From this point on, `work` is the full segmentation scratch image and `imp`
+        // remains the untouched source used for measurements/overlays.
+        // 2) Threshold + optional pause
+        if (!applyThreshold(work, thresholdConfig, pauseThreshold)) {
+            closeIfVisible(work);
+            return new MechanoQuantResult(null, null, 0, null, null);
+        }
+
+        // Convert current threshold to a binary mask.
+        IJ.run(work, "Convert to Mask", "");
+        // Now safe to show Gradient (Step 1)
+        if (gradientSnap != null) gradientSnap.show();
+
+        // Show Edge Mask (Step 2)
+        showStepSnapshot(work, "2 - Edge Mask", p.showSteps);
+
+        // 3) Fill holes and close small gaps while preserving edge structure.
+        ImagePlus filled = fillEdgeOpenHolesHybrid(work);
+        work.setProcessor(filled.getProcessor().duplicate());
+        closeAlways(filled);
+        // Show Edge Mask Filled
+        showStepSnapshot(work, "3 - Edge Mask Filled", p.showSteps);
+
+        // 4) Optional Watershed
+        if (p.watershed) {
+            IJ.run(work, "Watershed", "");
+            showStepSnapshot(work, "4 - Watershed", p.showSteps);
+        } else {
+            showStepSnapshot(work, "4 - Watershed Skipped", p.showSteps);
+        }
+
+        // Preserve the raw post-processing mask as an optional intermediate view. This
+        // still includes components that may later be filtered out by min-area.
+        showStepSnapshot(work, "5 - Pre-Label Mask", p.showSteps);
+
+        // 5) Analyze particles on mask, then measure on the original image.
+        AnalysisResult analysis = analyzeParticlesAndMeasureOnOriginal(
+                work,
+                imp,
+                p.minArea,
+                p.clearRM,
+                p.excludeBorderTouching,
+                p.measurements,
+                p.showResultsTable,
+                p.showRoiManager);
+        RoiManager rm = analysis.roiManager;
+        ResultsTable rt = analysis.resultsTable;
+
+        // Final output mask should match the accepted ROI set rather than the raw
+        // watershed mask, so filtered-out particles disappear from the saved/displayed mask.
+        final int w = work.getWidth();
+        final int h = work.getHeight();
+        ImagePlus mask = buildMaskFromRois(rm != null ? rm.getRoisAsArray() : null, w, h);
+        mask.setTitle("Cell Mask");
+
+        // 6) Labels image (1-based label per ROI)
+        ImagePlus labels = buildLabelsFromRois(rm, w, h);
+        labels.setTitle("Labels");
+
+        // Optional display LUT
+        try {
+            applyLabelsLut(labels, p.labelsLut);
+            IJ.run(labels, "Enhance Contrast", "saturated=0");
+        } catch (Throwable ignored) { }
+
+        if (p.showRoiOverlay && imp != null && rm != null) {
+            showRoiOverlayViaManager(imp, rm);
+        }
+
+        // 10) Optional overlay merge
+        if (p.showLabelOverlay) {
+            ImagePlus overlay = createLabelOverlay(imp, labels, p.labelsLut);
+            if (overlay != null) {
+                overlay.setTitle("LabelsOverlay");
+                overlay.show();
+            }
+        }
+
+        closeIfVisible(work);
+
+        int roiCount = rm.getCount();
+        return new MechanoQuantResult(mask, labels, roiCount, rm, rt);
+    }
+
+    private static void showRoiOverlayViaManager(ImagePlus imp, RoiManager roiManager) {
+        if (imp == null || roiManager == null) {
+            return;
+        }
+        if (imp.getWindow() == null) {
+            imp.show();
+        }
+        if (imp.getWindow() != null) {
+            WindowManager.setCurrentWindow(imp.getWindow());
+        }
+        roiManager.runCommand(imp, "Show All with labels");
+        imp.updateAndDraw();
+    }
+
+    private static ImagePlus duplicateForProcessing(ImagePlus imp) {
+        ImagePlus work = new Duplicator().run(imp);
+        final String sourceTitle = imp != null && imp.getTitle() != null ? imp.getTitle() : "Image";
+        work.setTitle(sourceTitle + " - Threshold Preview");
+        return work;
+    }
+
+    private static void applyEdgeDetector(ImagePlus work, EdgeDetector edgeDetector) {
+        if (edgeDetector == null) edgeDetector = EdgeDetector.SOBEL;
+
+        switch (edgeDetector) {
+            case NONE:
+                // no-op
+                break;
+            case SOBEL:
+                applyGradientMagnitude(work, SOBEL_X, SOBEL_Y);
+                break;
+            case PREWITT:
+                applyGradientMagnitude(work, PREWITT_X, PREWITT_Y);
+                break;
+            case SCHARR:
+                applyGradientMagnitude(work, SCHARR_X, SCHARR_Y);
+                break;
+            case LAPLACIAN_3X3:
+                applyLaplacian(work, LAPLACIAN_3X3);
+                break;
+            default:
+                applyGradientMagnitude(work, SOBEL_X, SOBEL_Y);
+                break;
+        }
+    }
+
+    private static void applyGradientMagnitude(ImagePlus work, float[] kx, float[] ky) {
+        FloatProcessor base = work.getProcessor().convertToFloatProcessor();
+        FloatProcessor gx = (FloatProcessor) base.duplicate();
+        FloatProcessor gy = (FloatProcessor) base.duplicate();
+
+        gx.convolve(kx, 3, 3);
+        gy.convolve(ky, 3, 3);
+
+        float[] px = (float[]) gx.getPixels();
+        float[] py = (float[]) gy.getPixels();
+        float[] out = (float[]) base.getPixels();
+
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (float) Math.hypot(px[i], py[i]);
+        }
+
+        work.setProcessor(base);
+    }
+
+    private static void applyLaplacian(ImagePlus work, float[] kernel) {
+        FloatProcessor base = work.getProcessor().convertToFloatProcessor();
+        base.convolve(kernel, 3, 3);
+        float[] out = (float[]) base.getPixels();
+        for (int i = 0; i < out.length; i++) {
+            out[i] = Math.abs(out[i]);
+        }
+        work.setProcessor(base);
+    }
+
+    private static void normalizeToUnitRange(ImagePlus work) {
+        if (work == null || work.getProcessor() == null) {
+            return;
+        }
+
+        final FloatProcessor normalized = work.getProcessor().convertToFloatProcessor();
+        final float[] pixels = (float[]) normalized.getPixels();
+        if (pixels == null || pixels.length == 0) {
+            work.setProcessor(normalized);
+            return;
+        }
+
+        float min = Float.POSITIVE_INFINITY;
+        float max = Float.NEGATIVE_INFINITY;
+        for (float value : pixels) {
+            if (value < min) min = value;
+            if (value > max) max = value;
+        }
+
+        final float range = max - min;
+        if (range <= 0f) {
+            for (int i = 0; i < pixels.length; i++) {
+                pixels[i] = 0f;
+            }
+        } else {
+            for (int i = 0; i < pixels.length; i++) {
+                pixels[i] = (pixels[i] - min) / range;
+            }
+        }
+
+        work.setProcessor(normalized);
+    }
+
+    private static void autoAdjustDisplayRange(ImagePlus work) {
+        if (work == null || work.getProcessor() == null) {
+            return;
+        }
+        work.getProcessor().resetMinAndMax();
+        work.resetDisplayRange();
+        work.updateAndDraw();
+    }
+
+    private static boolean applyThreshold(ImagePlus work, ThresholdConfig thresholdConfig, boolean pauseThreshold) {
+        final ThresholdConfig config = thresholdConfig != null
+                ? thresholdConfig
+                : ThresholdConfig.auto("Default", true);
+
+        // Applying the config here keeps threshold selection deterministic for batch mode
+        // while still supporting the original interactive "pause and adjust" flow.
+        config.applyTo(work);
+
+        if (pauseThreshold) {
+            // Needs an image window; if work wasn't shown, show it now.
+            if (work.getWindow() == null) {
+                ReviewWindowUtils.showImageWindowCentered(work);
+                if (work.getWindow() != null) {
+                    WindowManager.setCurrentWindow(work.getWindow());
+                }
+            }
+
+            IJ.run(work, "Threshold...", "");
+            return showSingleImageThresholdDialog();
+        }
+        return true;
+    }
+
+    private static boolean showSingleImageThresholdDialog() {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<Boolean> shouldContinue = new AtomicReference<Boolean>(Boolean.TRUE);
+        final AtomicBoolean completed = new AtomicBoolean(false);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                final JDialog dialog = createCenteredDialog(
+                        "Adjust threshold",
+                        "Adjust the threshold, then choose an action.",
+                        false);
+
+                final Runnable continueRun = new Runnable() {
+                    @Override
+                    public void run() {
+                        if (completed.compareAndSet(false, true)) {
+                            shouldContinue.set(Boolean.TRUE);
+                            dialog.dispose();
+                            latch.countDown();
+                        }
+                    }
+                };
+
+                final Runnable abortRun = new Runnable() {
+                    @Override
+                    public void run() {
+                        if (completed.compareAndSet(false, true)) {
+                            shouldContinue.set(Boolean.FALSE);
+                            dialog.dispose();
+                            latch.countDown();
+                        }
+                    }
+                };
+
+                JButton continueButton = new JButton("Continue");
+                continueButton.addActionListener(e -> continueRun.run());
+                JButton abortButton = new JButton("Abort");
+                abortButton.addActionListener(e -> abortRun.run());
+                dialog.add(buttonPanel(continueButton, abortButton), BorderLayout.SOUTH);
+                dialog.addWindowListener(new WindowAdapter() {
+                    @Override
+                    public void windowClosing(WindowEvent e) {
+                        continueRun.run();
+                    }
+                });
+                dialog.setVisible(true);
+            }
+        });
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+
+        if (!shouldContinue.get().booleanValue()) {
+            IJ.log("[MechanoQuant] Aborted during threshold adjustment.");
+        }
+        return shouldContinue.get().booleanValue();
+    }
+
+    private static JDialog createCenteredDialog(String title, String message, boolean alwaysOnTop) {
+        final Frame owner = IJ.getInstance();
+        final JDialog dialog = new JDialog(owner, title, false);
+        dialog.setLayout(new BorderLayout(8, 8));
+        final JLabel label = new JLabel(
+                "<html><div style='text-align:center;'>" + message + "</div></html>",
+                SwingConstants.CENTER);
+        label.setBorder(new EmptyBorder(12, 16, 4, 16));
+        dialog.add(label, BorderLayout.CENTER);
+        dialog.setAlwaysOnTop(alwaysOnTop);
+        dialog.pack();
+        final Dimension size = dialog.getSize();
+        dialog.setSize(new Dimension(Math.max(380, size.width), Math.max(150, size.height)));
+        centerOnScreen(dialog);
+        return dialog;
+    }
+
+    private static void centerOnScreen(JDialog dialog) {
+        final Rectangle bounds = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        final int x = bounds.x + Math.max(0, (bounds.width - dialog.getWidth()) / 2);
+        final int y = bounds.y + Math.max(0, (bounds.height - dialog.getHeight()) / 2);
+        dialog.setLocation(x, y);
+    }
+
+    private static JPanel buttonPanel(JButton... buttons) {
+        final JPanel panel = new JPanel();
+        for (JButton button : buttons) {
+            panel.add(button);
+        }
+        return panel;
+    }
+
+    private static AnalysisResult analyzeParticlesAndMeasureOnOriginal(
+            ImagePlus binaryMask,
+            ImagePlus original,
+            int minArea,
+            boolean clearRM,
+            boolean excludeBorderTouching,
+            int measurements,
+            boolean showResultsTable,
+            boolean showRoiManager) {
+
+        // ROI Manager is global state in IJ1. `clearRM` decides whether this run should
+        // start from an empty manager or append to whatever is already there.
+        final boolean useVisibleRoiManager = showRoiManager;
+        RoiManager rm = useVisibleRoiManager ? RoiManager.getInstance() : null;
+        if (rm == null) {
+            // Use a hidden manager when the caller only needs ROI storage and not the
+            // floating ROI Manager window.
+            rm = useVisibleRoiManager ? new RoiManager() : new RoiManager(false);
+        }
+        rm.setVisible(showRoiManager);
+        if (clearRM) rm.reset();
+
+        // ResultsTable for the final measurement pass (on the original image).
+        ResultsTable rt = new ResultsTable();
+
+        addFourConnectedMaskRois(binaryMask, rm, minArea);
+
+        if (excludeBorderTouching) {
+            filterBorderTouchingRois(rm, binaryMask.getWidth(), binaryMask.getHeight());
+        }
+
+        // Measure on the original grayscale image rather than the binary mask, because
+        // intensity statistics on the mask would be meaningless.
+        Analyzer analyzer = new Analyzer(original, measurements, rt);
+
+        Roi[] roisForMeasure = rm.getRoisAsArray();
+        for (Roi roi : roisForMeasure) {
+            original.setRoi(roi);
+            analyzer.measure();
+        }
+        original.deleteRoi();
+
+        if (showResultsTable) {
+            rt.show("Results");
+        }
+
+        return new AnalysisResult(rm, rt);
+    }
+
+    private static void addFourConnectedMaskRois(ImagePlus binaryMask, RoiManager roiManager, int minArea) {
+        if (binaryMask == null || roiManager == null) {
+            return;
+        }
+
+        final int width = binaryMask.getWidth();
+        final int height = binaryMask.getHeight();
+        final ByteProcessor bp = binaryMask.getProcessor().convertToByteProcessor();
+        final byte[] pix = (byte[]) bp.getPixels();
+        final List<ConnectedComponents.Component> components =
+                ConnectedComponents.findForegroundComponents(pix, width, height, false);
+
+        for (ConnectedComponents.Component component : components) {
+            if (component == null || component.area() < minArea) {
+                continue;
+            }
+            final Roi roi = componentToRoi(component, width, height);
+            if (roi != null) {
+                roiManager.addRoi(roi);
+            }
+        }
+    }
+
+    private static Roi componentToRoi(ConnectedComponents.Component component, int width, int height) {
+        if (component == null || component.pixels == null || component.pixels.length == 0) {
+            return null;
+        }
+
+        final byte[] componentPixels = new byte[width * height];
+        for (int idx : component.pixels) {
+            componentPixels[idx] = (byte) 255;
+        }
+
+        final ImageProcessor componentIp = new ByteProcessor(width, height, componentPixels, null);
+        final int seed = component.pixels[0];
+        final int seedY = seed / width;
+        final int seedX = seed - seedY * width;
+        final Wand wand = new Wand(componentIp);
+        wand.autoOutline(seedX, seedY, 255, 255, Wand.FOUR_CONNECTED);
+        if (wand.npoints < 3) {
+            final ConnectedComponents.Stats stats = component.stats;
+            return new Roi(stats.minX, stats.minY, stats.width(), stats.height());
+        }
+        return new PolygonRoi(new Polygon(wand.xpoints, wand.ypoints, wand.npoints), Roi.TRACED_ROI);
+    }
+
+    private static void filterBorderTouchingRois(RoiManager roiManager, int width, int height) {
+        if (roiManager == null || width <= 0 || height <= 0) {
+            return;
+        }
+
+        final Roi[] rois = roiManager.getRoisAsArray();
+        if (rois == null || rois.length == 0) {
+            return;
+        }
+
+        final List<Roi> kept = new ArrayList<Roi>(rois.length);
+        for (Roi roi : rois) {
+            if (roi == null || touchesImageBorder(roi, width, height)) {
+                continue;
+            }
+            kept.add(roi);
+        }
+
+        roiManager.reset();
+        for (Roi roi : kept) {
+            roiManager.addRoi(roi);
+        }
+    }
+
+    private static boolean touchesImageBorder(Roi roi, int width, int height) {
+        if (roi == null) {
+            return false;
+        }
+        final Rectangle bounds = roi.getBounds();
+        return bounds.x <= 0
+                || bounds.y <= 0
+                || bounds.x + bounds.width >= width
+                || bounds.y + bounds.height >= height;
+    }
+
+    private static ImagePlus buildLabelsFromRois(RoiManager rm, int w, int h) {
+        Roi[] rois = (rm == null) ? new Roi[0] : rm.getRoisAsArray();
+        return buildLabelsFromRoisArray(rois, w, h);
+    }
+
+    private static ImagePlus buildLabelsFromRoisArray(Roi[] rois, int w, int h) {
+        ImagePlus labels = IJ.createImage("Labels", "16-bit black", w, h, 1);
+        ImageProcessor ip = labels.getProcessor();
+
+        if (rois == null) {
+            return labels;
+        }
+        for (int i = 0; i < rois.length; i++) {
+            if (rois[i] == null) {
+                continue;
+            }
+            ip.setValue(i + 1);
+            ip.fill(rois[i]);
+        }
+        return labels;
+    }
+
+    public static ImagePlus createLabelOverlay(ImagePlus imp, ImagePlus labelsOut, String labelsLut) {
+        if (imp == null || labelsOut == null) return null;
+        ImagePlus base = imp.duplicate();
+        ImagePlus labels = labelsOut.duplicate();
+
+        // Ensure labels are colored before RGB conversion.
+        applyLabelsLut(labels, labelsLut);
+
+        ImagePlus blended = alphaBlendRgb(base, labels, labelsOut, 0.5f, true);
+        closeAlways(base);
+        closeAlways(labels);
+        return blended;
+    }
+
+    private static void applyLabelsLut(ImagePlus labels, String labelsLut) {
+        String lut = (labelsLut == null || labelsLut.trim().isEmpty()) ? "Rainbow RGB" : labelsLut.trim();
+        IJ.run(labels, lut, "");
+    }
+
+    private static ImagePlus alphaBlendRgb(ImagePlus base, ImagePlus overlay, ImagePlus zeroMaskSource, float alpha, boolean transparentZeroOverlay) {
+        if (alpha < 0f || alpha > 1f) {
+            throw new IllegalArgumentException("alpha must be in [0,1]");
+        }
+        ImagePlus baseRgb = base.duplicate();
+        ImagePlus overlayRgb = overlay.duplicate();
+
+        new ImageConverter(baseRgb).convertToRGB();
+        new ImageConverter(overlayRgb).convertToRGB();
+
+        ColorProcessor bp = (ColorProcessor) baseRgb.getProcessor();
+        ColorProcessor op = (ColorProcessor) overlayRgb.getProcessor();
+
+        int[] bpx = (int[]) bp.getPixels();
+        int[] opx = (int[]) op.getPixels();
+
+        int w = bp.getWidth();
+        int h = bp.getHeight();
+        int[] out = new int[w * h];
+
+        ImageProcessor zp = (zeroMaskSource != null) ? zeroMaskSource.getProcessor() : null;
+        byte[] zb = null;
+        short[] zs = null;
+        float[] zf = null;
+        if (zp != null && zp.getWidth() == w && zp.getHeight() == h) {
+            if (zp instanceof ByteProcessor) zb = (byte[]) zp.getPixels();
+            else if (zp instanceof ShortProcessor) zs = (short[]) zp.getPixels();
+            else if (zp instanceof FloatProcessor) zf = (float[]) zp.getPixels();
+        }
+
+        float inv = 1.0f - alpha;
+        for (int i = 0; i < out.length; i++) {
+            if (transparentZeroOverlay) {
+                if (zb != null && (zb[i] & 0xFF) == 0) {
+                    out[i] = bpx[i];
+                    continue;
+                }
+                if (zs != null && (zs[i] & 0xFFFF) == 0) {
+                    out[i] = bpx[i];
+                    continue;
+                }
+                if (zf != null && Math.round(zf[i]) == 0) {
+                    out[i] = bpx[i];
+                    continue;
+                }
+                if (zb == null && zs == null && zf == null && (opx[i] & 0x00FFFFFF) == 0) {
+                    out[i] = bpx[i];
+                    continue;
+                }
+            }
+
+            int bc = bpx[i];
+            int br = (bc >> 16) & 0xFF;
+            int bg = (bc >> 8) & 0xFF;
+            int bb = bc & 0xFF;
+
+            int oc = opx[i];
+            int or = (oc >> 16) & 0xFF;
+            int og = (oc >> 8) & 0xFF;
+            int ob = oc & 0xFF;
+
+            int r = Math.round(br * inv + or * alpha);
+            int g = Math.round(bg * inv + og * alpha);
+            int b = Math.round(bb * inv + ob * alpha);
+
+            out[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+        }
+
+        return new ImagePlus("LabelsOverlay", new ColorProcessor(w, h, out));
+    }
+
+    private static void showStepSnapshot(ImagePlus img, String title, boolean show) {
+        if (!show || img == null) return;
+        ImagePlus snap = img.duplicate();
+        snap.setTitle(title);
+        snap.show();
+    }
+
+    private static void closeIfVisible(ImagePlus imp) {
+        if (imp != null && imp.getWindow() != null) {
+            closeImageSafely(imp);
+        }
+    }
+
+    private static void closeAlways(ImagePlus imp) {
+        if (imp == null) return;
+        closeImageSafely(imp); // safe whether visible or not
+    }
+
+    private static void closeImageSafely(final ImagePlus imp) {
+        if (imp == null) return;
+        if (imp.getWindow() != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    imp.changes = false;
+                    imp.close();
+                }
+            });
+            return;
+        }
+        imp.changes = false;
+        imp.close();
+    }
+
+    private static final class AnalysisResult {
+        final RoiManager roiManager;
+        final ResultsTable resultsTable;
+
+        private AnalysisResult(RoiManager roiManager, ResultsTable resultsTable) {
+            this.roiManager = roiManager;
+            this.resultsTable = resultsTable;
+        }
+    }
+
+    public static ImagePlus fillEdgeOpenHolesHybrid(ImagePlus edgeMask) {
+        if (edgeMask == null) return null;
+
+        final int w = edgeMask.getWidth();
+        final int h = edgeMask.getHeight();
+
+        // I1: closed edges with 1px padding to reduce border effects.
+        ImagePlus I1 = edgeMask.duplicate();
+        IJ.run(I1, "8-bit", "");
+
+        // pad by 1px
+        IJ.run(I1, "Canvas Size...", "width=" + (w+2) + " height=" + (h+2) + " position=Center");
+        // close
+        IJ.run(I1, "Close-", "");
+        // crop back
+        IJ.run(I1, "Canvas Size...", "width=" + w + " height=" + h + " position=Center");
+
+
+        // I2: global fill holes of I1.
+        ImagePlus I2 = I1.duplicate();
+        IJ.run(I2, "Fill Holes", "");
+        closeAlways(I1);
+
+        // I3: complement of I2.
+        ImagePlus I3 = I2.duplicate();
+        IJ.run(I3, "Invert", "");
+
+        // I4: fill background holes of I3.
+        ImagePlus I4 = I3.duplicate();
+        IJ.run(I4, "Fill Holes", "");
+        closeAlways(I3);
+
+        // I5: remove any 4-connected components that touch 3+ image edges.
+        ImagePlus I5 = removeBorderComponents(I4, 3);
+        closeAlways(I4);
+
+        // Final mask = I2 OR I5.
+        ImagePlus out = orBinary(I2, I5);
+        out.setTitle("FilledMask");
+        closeAlways(I2);
+        closeAlways(I5);
+        return out;
+    }
+
+    private static ImagePlus removeBorderComponents(ImagePlus binary, int minBorderCount) {
+        final int w = binary.getWidth();
+        final int h = binary.getHeight();
+
+        if (minBorderCount < 1 || minBorderCount > 4) {
+            throw new IllegalArgumentException("minBorderCount must be in [1,4]");
+        }
+
+        // Work on a byte copy so we can safely clear components in-place.
+        ByteProcessor ip = binary.getProcessor().convertToByteProcessor(); // independent copy
+        final byte[] pix = (byte[]) ip.getPixels();
+
+        ConnectedComponents.forEachForegroundComponent(pix, w, h, false, new ConnectedComponents.ComponentHandler() {
+            @Override public void handle(ConnectedComponents.ComponentView c) {
+                if (c.stats().borderCount() >= minBorderCount) {
+                    c.clear(); // clears in-place on pix
+                }
+            }
+        });
+
+        return new ImagePlus("I5", ip);
+    }
+
+    /** OR two binary images (nonzero => 255). Assumes same w/h. */
+    private static ImagePlus orBinary(ImagePlus a, ImagePlus b) {
+        final int w = a.getWidth();
+        final int h = a.getHeight();
+
+        ByteProcessor ipa = (ByteProcessor) a.getProcessor().convertToByteProcessor();
+        ByteProcessor ipb = (ByteProcessor) b.getProcessor().convertToByteProcessor();
+
+        byte[] pa = (byte[]) ipa.getPixels();
+        byte[] pb = (byte[]) ipb.getPixels();
+
+        ByteProcessor out = new ByteProcessor(w, h);
+        byte[] po = (byte[]) out.getPixels();
+
+        for (int i = 0; i < w * h; i++) {
+            int va = pa[i] & 0xFF;
+            int vb = pb[i] & 0xFF;
+            po[i] = (byte) ((va != 0 || vb != 0) ? 255 : 0);
+        }
+
+        return new ImagePlus("I2_OR_I5", out);
+    }
+}

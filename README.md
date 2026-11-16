@@ -1,13 +1,19 @@
-# Fiji Cell Segmentation
+# MechanoQuant
 
-![Version](https://img.shields.io/badge/version-0.5.0-green)
+![Version](https://img.shields.io/badge/version-0.6.0--SNAPSHOT-green)
 
-Fiji/ImageJ plugin for segmenting cells in RICM images. It can run fully automatically, but also provides interactive review points for adjusting thresholds and ROIs when the segmentation needs a human eye.
+MechanoQuant is a Fiji/ImageJ plugin for segmenting cells in RICM images and measuring the resulting regions in source or paired images. It supports individual images, stacks, and batch workflows, with optional interactive threshold and ROI review.
 
 The plugin supports:
 - measuring accepted ROIs in the source image or in a paired image, such as a fluorescence image of the same region
 - running on a single open image, an open stack, or many files in batch mode
 - several batch organization schemes, including separate RICM and fluorescence files, multi-series containers, and multi-channel images
+
+Open `Plugins > CPMM > MechanoQuant...` and choose `Current image` to process the active image or stack, or `Select file(s)` to open the file/batch workflow. `Cancel` closes the launcher without processing.
+
+Repository: https://github.com/will-f-dean-36/mechano-quant
+
+Planned documentation/wiki: https://sites.imagej.net/mechano-quant (not live yet)
 
 ## Status
 
@@ -27,9 +33,9 @@ Early release (`0.x`), under active development.
 2. Click `Manage update sites`.
 3. Click `Add update site`.
 4. Enter:
-   - Name: `Cell Segmentation`
-   - URL: `https://sites.imagej.net/CellSegmentation/`
-5. Check the new `Cell Segmentation` update site.
+   - Name: `CPMM`
+   - URL: `https://sites.imagej.net/CPMM/`
+5. Check the new `CPMM` update site.
 6. Click `Close`.
 7. Click `Apply changes`.
 8. Restart Fiji.
@@ -39,14 +45,7 @@ After installation, Fiji can receive plugin updates through the normal updater.
 The plugin should appear under:
 
 ```text
-Plugins > Cell Segmentation
-```
-
-Menu entries:
-
-```text
-Run on current image/stack...
-Run on multiple images...
+Plugins > CPMM > MechanoQuant...
 ```
 
 ### Installation From a JAR
@@ -59,14 +58,7 @@ Run on multiple images...
 4. The plugin should appear under:
 
 ```text
-Plugins > Cell Segmentation
-```
-
-Menu entries:
-
-```text
-Run on current image/stack...
-Run on multiple images...
+Plugins > CPMM > MechanoQuant...
 ```
 
 If the plugin does not appear:
@@ -92,7 +84,7 @@ mvn clean package
 The built JAR will be written to:
 
 ```text
-target/Cell_Segmentation-<version>.jar
+target/Mechano_Quant-<version>.jar
 ```
 
 Install that JAR into Fiji as described above.
@@ -128,8 +120,10 @@ Outputs can include:
 Menu:
 
 ```text
-Plugins > Cell Segmentation > Run on current image/stack...
+Plugins > CPMM > MechanoQuant...
 ```
+
+Choose `Current image` in the launcher.
 
 Input requirements:
 - the currently active Fiji image is used
@@ -151,12 +145,14 @@ To automatically measure accepted ROIs on a separate paired image, such as a flu
 Menu:
 
 ```text
-Plugins > Cell Segmentation > Run on multiple images...
+Plugins > CPMM > MechanoQuant...
 ```
+
+Choose `Select file(s)` in the launcher.
 
 Batch mode supports five input modes.
 
-#### Mode 1: RICM file list
+#### RICM file list
 
 Use this when:
 - you have a list of standalone RICM files
@@ -166,7 +162,7 @@ Use this when:
 Measurements:
 - accepted ROIs are measured on the same RICM image
 
-#### Mode 2: RICM container
+#### RICM container
 
 Use this when:
 - you have one multi-series container file
@@ -176,7 +172,7 @@ Use this when:
 Measurements:
 - accepted ROIs are measured on the same RICM series
 
-#### Mode 3: Two container files
+#### Two container files
 
 Use this when:
 - one container file holds RICM series
@@ -187,7 +183,7 @@ Example:
 - RICM series 1 pairs with fluorescence series 1
 - RICM series 2 pairs with fluorescence series 2
 
-#### Mode 4: Two file lists
+#### Two file lists
 
 Use this when:
 - one file list contains RICM images
@@ -198,16 +194,15 @@ Example:
 - first selected RICM file pairs with first selected fluorescence file
 - second selected RICM file pairs with second selected fluorescence file
 
-#### Mode 5: Same-file channels
+#### Multi-channel file list (segment one channel, measure others)
 
 Use this when:
 - one file contains both RICM and fluorescence channels
 - one channel is used for segmentation
-- later channels are used for measurement
+- all channels except the selected RICM channel are used for measurement
+- files must contain at least two channels
 
-You must specify:
-- the RICM segmentation channel
-- the first fluorescence channel
+Only the RICM segmentation channel must be specified.
 
 ## Single-image Dialog
 
@@ -217,6 +212,8 @@ The single-image dialog has two tabs:
 - `Advanced`
 
 ### General tab
+
+#### Segmentation
 
 - `Auto-threshold method`
   - Fiji/ImageJ auto-threshold method applied to the normalized edge image unless a manual threshold is selected during review.
@@ -234,6 +231,13 @@ The single-image dialog has two tabs:
 - `Attempt to separate touching cells (watershed)`
   - `Yes`: run ImageJ watershed before ROI generation
   - `No`: skip watershed
+
+#### Save
+
+- `Save results`: enables saving to disk after the run
+- `Output directory`: destination folder for saved outputs
+
+Select the individual output types in the Advanced tab's Save panel.
 
 The dialog also includes `Restore Defaults`, which resets processing, review, measurement, and save settings to factory defaults while leaving selected files and output directories alone.
 
@@ -289,20 +293,18 @@ For stacks, those review steps are applied slice-by-slice.
 
 #### Display
 
-- `Show intermediate images`
-  - show intermediate processing steps from the segmentation pipeline
-- `Show mask image`
-  - show the final binary mask image
-- `Show labels image`
-  - show the final label image
-- `Show ROI overlay on source image`
-  - apply accepted ROIs to the source image via ROI Manager
-- `Show label overlay`
-  - show a label overlay image
-- `Labels LUT`
-  - LUT used when displaying labels
-- `Clear ROI Manager first`
+- `Clear ROI Manager first` (on by default)
   - clear the ROI Manager before adding final accepted ROIs
+- `Show ROI overlay on source image` (on by default)
+  - apply accepted ROIs to the source image via ROI Manager
+- `Show mask image` (off by default)
+  - show the final binary mask image
+- `Show labels image` (off by default)
+  - show the final label image
+- `Show label overlay` (off by default)
+  - show a label overlay image
+- `Show intermediate images` (off by default)
+  - show intermediate processing steps from the segmentation pipeline
 
 #### Measurements
 
@@ -322,18 +324,16 @@ These are standard ImageJ measurements performed on the accepted ROIs.
 
 #### Save
 
-- `Automatically save results`
-  - enables saving to disk after the run
-- `Output directory`
-  - destination folder for saved outputs
-- `Save mask image`
-- `Save labels image`
-- `Save label overlay`
-- `Save ROIs (ZIP)`
-- `Save measurements (CSV)`
-- `Save segmentation parameters (CSV)`
+- `Save ROIs (ZIP)` (on by default)
+- `Save measurements (CSV)` (on by default)
+- `Save segmentation parameters (CSV)` (on by default)
+- `Save mask image` (off by default)
+- `Save labels image` (off by default)
+- `Save label overlay` (off by default)
 
-When auto-save is off, the individual save toggles are disabled.
+When `Save results` is off in General, the individual save toggles are disabled.
+
+Labels use the Rainbow RGB LUT; the LUT selector is currently hidden.
 
 ## Batch Dialog
 
@@ -354,22 +354,23 @@ Common behavior:
 
 Mode-specific inputs:
 
-- Mode 1
+- RICM file list
   - `RICM files`
-- Mode 2
+- RICM container
   - `RICM container`
-- Mode 3
+- Two container files
   - `RICM container`
   - `Fluorescence container`
-- Mode 4
+- Two file lists
   - `RICM files`
   - `Fluorescence files`
-- Mode 5
+- Multi-channel file list
   - `Combined multi-channel files`
-  - `Mode 5 RICM channel`
-  - `Mode 5 first fluorescence channel`
+  - `RICM channel`
 
 ### General tab
+
+#### Segmentation
 
 Same meaning as single-image mode:
 - `Auto-threshold method`
@@ -378,6 +379,12 @@ Same meaning as single-image mode:
 - `Min cell area (px)`
 - `Exclude border-touching cells`
 - `Attempt to separate touching cells (watershed)`
+
+#### Save
+
+- `Output directory`: destination folder for saved outputs
+
+Batch mode always saves results, so it has no master save checkbox. Select the individual output types in the Advanced tab's Save panel.
 
 The dialog also includes `Restore Defaults`, which resets processing, review, measurement, and save settings to factory defaults while preserving selected input files and the output directory.
 
@@ -406,19 +413,18 @@ Behavior notes:
 Same measurement toggles as single-image mode.
 
 For batch mode:
-- in Modes 1-2, measurements are performed on the RICM segmentation image/series itself
-- in Modes 3-5, measurements are performed on the paired fluorescence image(s) or fluorescence channels
+- in RICM file list and RICM container inputs, measurements use the RICM image/series itself
+- in paired container/file list inputs, measurements use the paired fluorescence images
+- in multi-channel file list inputs, measurements use all channels except the selected RICM channel
 
 #### Save
 
-- `Output directory`
-- `Labels LUT`
-- `Save mask image`
-- `Save labels image`
-- `Save label overlay`
-- `Save ROIs (ZIP)`
-- `Save measurements (CSV)`
-- `Save segmentation parameters (CSV)`
+- `Save ROIs (ZIP)` (on by default)
+- `Save measurements (CSV)` (on by default)
+- `Save segmentation parameters (CSV)` (on by default)
+- `Save mask image` (off by default)
+- `Save labels image` (off by default)
+- `Save label overlay` (off by default)
 
 ## Saved Outputs
 
@@ -477,3 +483,8 @@ Settings chosen in the custom dialogs are remembered between runs using Fiji pre
 
 - Batch file selections themselves are not persisted as defaults.
 - This is still a `0.x` project, so UI details and defaults may continue to evolve.
+
+## License
+
+MechanoQuant is distributed under the [BSD 2-Clause License](LICENSE).
+Copyright (c) 2026 William F Dean.

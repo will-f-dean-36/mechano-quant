@@ -1,0 +1,1140 @@
+package com.will.mechanoquant;
+
+import com.will.mechanoquant.batch.BioFormatsPlaneReader;
+import com.will.mechanoquant.batch.FrameSpec;
+import com.will.mechanoquant.batch.InputMode;
+import com.will.mechanoquant.batch.InputResolver;
+import com.will.mechanoquant.batch.MeasUnit;
+import com.will.mechanoquant.batch.MeasurementPlan;
+import com.will.mechanoquant.batch.PairedUnit;
+import com.will.mechanoquant.batch.SegUnit;
+import com.will.mechanoquant.batch.SeriesMetadata;
+import ij.IJ;
+import ij.ImagePlus;
+import ij.Prefs;
+import ij.gui.Roi;
+import ij.measure.ResultsTable;
+import ij.plugin.filter.Analyzer;
+import ij.plugin.frame.RoiManager;
+import java.io.File;
+import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.swing.SwingUtilities;
+import org.scijava.ItemVisibility;
+import org.scijava.Context;
+import org.scijava.command.Command;
+import org.scijava.plugin.Parameter;
+import org.scijava.plugin.Plugin;
+
+@SuppressWarnings({"unused", "FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+@Plugin(type = Command.class, name = "MechanoQuant Batch")
+public class MechanoQuantBatchCommand implements Command {
+    private static final String[] YES_NO = {"No", "Yes"};
+    private static final String[] THRESHOLD_METHODS = {
+            "Default",
+            "Huang",
+            "Intermodes",
+            "IsoData",
+            "Li",
+            "MaxEntropy",
+            "Mean",
+            "MinError",
+            "Minimum",
+            "Moments",
+            "Otsu",
+            "Percentile",
+            "RenyiEntropy",
+            "Shanbhag",
+            "Triangle",
+            "Yen"
+    };
+    private static final String[] EDGE_METHODS = {
+            "Sobel (Gradient)",
+            "Prewitt",
+            "Scharr",
+            "Laplacian (3x3)",
+            "None"
+    };
+    private static final String[] LABEL_LUTS = {
+            "Rainbow RGB",
+            "16_colors",
+            "Glasbey",
+            "Fire",
+            "Ice",
+            "Grays",
+            "Spectrum"
+    };
+
+    // These strings intentionally match the IJ1 wrapper choices exactly, since the
+    // wrapper passes them through as hidden SciJava parameters.
+    private static final String THRESHOLD_STOP_OFF = "No";
+    private static final String THRESHOLD_STOP_UNIQUE = "Yes";
+
+    private static final String ROI_REVIEW_OFF = "No";
+    private static final String ROI_REVIEW_ONCE = "Yes";
+
+    @Parameter
+    private Context context;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE)
+    private String inputMode;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE, required = false)
+    private File ricmContainerFile;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE, required = false)
+    private File fluorContainerFile;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE, required = false)
+    private File[] ricmFiles;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE, required = false)
+    private File[] fluorFiles;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE, required = false)
+    private File[] combinedFiles;
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE)
+    private int sameFileSegChannelIndex1Based = 1;
+
+
+    @Parameter(visibility = ItemVisibility.INVISIBLE)
+    private boolean allTimepoints = true;
+
+    private String thresholdStopMode = THRESHOLD_STOP_UNIQUE;
+
+    private String roiReviewMode = ROI_REVIEW_ONCE;
+
+    private File outputDir = MechanoQuantIO.getDefaultOutputDirectory();
+
+    private int minArea = 500;
+    private String thrMethod = "Default";
+    private boolean darkObjects = true;
+    private String edgeMethod = "Sobel (Gradient)";
+    private String labelsLut = "Rainbow RGB";
+    private boolean excludeBorderTouching = false;
+    private boolean watershed = false;
+
+    private boolean saveMask = false;
+    private boolean saveLabels = false;
+    private boolean saveLabelOverlay = false;
+    private boolean saveRois = true;
+    private boolean saveMeasurements = true;
+    private boolean saveParameters = true;
+
+    private boolean measureArea = true;
+    private boolean measureMean = true;
+    private boolean measureMinMax = true;
+    private boolean measureStdDev = true;
+    private boolean measurePerimeter = true;
+    private boolean measureCentroid = true;
+    private boolean measureRect = true;
+    private boolean measureFeret = true;
+    private boolean measureShape = true;
+    private boolean measureIntDen = true;
+    private final Map<String, CachedSegmentationResult> segmentationCache =
+            new HashMap<String, CachedSegmentationResult>();
+    private final Map<String, ThresholdConfig> thresholdConfigCache =
+            new HashMap<String, ThresholdConfig>();
+
+    @Override
+    public void run() {
+        final BatchSegmentationDialog.Result options = BatchSegmentationDialog.showDialog(new BatchSegmentationDialog.Result(
+                inputMode != null ? inputModeToIndex(inputMode) : 0,
+                sameFileSegChannelIndex1Based,
+                ricmContainerFile,
+                fluorContainerFile,
+                ricmFiles,
+                fluorFiles,
+                combinedFiles,
+                minArea,
+                thrMethod,
+                darkObjects,
+                edgeMethod,
+                excludeBorderTouching,
+                watershed,
+                thresholdStopMode,
+                roiReviewMode,
+                measureArea,
+                measureMean,
+                measureMinMax,
+                measureStdDev,
+                measurePerimeter,
+                measureCentroid,
+                measureRect,
+                measureFeret,
+                measureShape,
+                measureIntDen,
+                outputDir,
+                labelsLut,
+                saveMask,
+                saveLabels,
+                saveLabelOverlay,
+                saveRois,
+                saveMeasurements,
+                saveParameters));
+        if (options == null) {
+            return;
+        }
+        applyOptions(options);
+
+        // This command is the real batch engine: validate inputs, load planes, segment
+        // the RICM source once per pair, then measure the paired fluorescence planes.
+        final boolean prevBlackBg = Prefs.blackBackground;
+        BatchStopController stopController = null;
+
+        try {
+            Prefs.blackBackground = true;
+
+            if (outputDir == null) {
+                IJ.error("No output directory selected.");
+                return;
+            }
+            if (!outputDir.exists() && !outputDir.mkdirs()) {
+                IJ.error("Could not create output directory: " + outputDir.getAbsolutePath());
+                return;
+            }
+            MechanoQuantIO.rememberOutputDirectory(outputDir);
+
+            final InputMode mode;
+            try {
+                mode = InputMode.fromName(inputMode);
+            } catch (Exception e) {
+                IJ.error("Invalid batch mode", e.getMessage());
+                return;
+            }
+
+            final BioFormatsPlaneReader reader;
+            try {
+                reader = new BioFormatsPlaneReader();
+            } catch (BioFormatsPlaneReader.BioFormatsUnavailableException e) {
+                IJ.error("Bio-Formats not available",
+                        "Bio-Formats is required for batch reading (ND2/CZI/LIF/etc.).\n"
+                                + "Install or update Bio-Formats in Fiji (Help > Update...).");
+                return;
+            }
+
+            // `InputResolver` converts the chosen file-selection mode into a normalized
+            // list of `(segmentation source, measurement source)` pairs.
+            List<PairedUnit> pairedUnits;
+            try {
+                pairedUnits = InputResolver.resolve(
+                        mode,
+                        ricmContainerFile,
+                        fluorContainerFile,
+                        ricmFiles,
+                        fluorFiles,
+                        combinedFiles,
+                        sameFileSegChannelIndex1Based,
+                        allTimepoints,
+                        reader);
+            } catch (Exception e) {
+                IJ.error("Invalid batch inputs", e.getMessage());
+                return;
+            }
+
+            try {
+                pairedUnits = normalizeMeasurementChannels(pairedUnits, mode, reader);
+            } catch (Exception e) {
+                IJ.error("Batch validation failed", e.getMessage());
+                return;
+            }
+
+            try {
+                validatePairsOrThrow(pairedUnits, reader);
+            } catch (Exception e) {
+                IJ.error("Batch validation failed", e.getMessage());
+                return;
+            }
+
+            IJ.log("[MechanoQuant Batch] Starting mode=" + mode.name() + " pairs=" + pairedUnits.size());
+            IJ.log("[MechanoQuant Batch] Output dir: " + outputDir.getAbsolutePath());
+
+            final EdgeDetector edgeDetector = EdgeDetector.fromLabel(edgeMethod);
+            int measurements = buildMeasurementFlags();
+            if (measurements == 0) {
+                measurements = ij.measure.Measurements.AREA;
+                IJ.log("[MechanoQuant Batch] No measurements selected; defaulting to Area.");
+            }
+
+            final MechanoQuantParams p = new MechanoQuantParams(
+                    minArea,
+                    thrMethod,
+                    darkObjects,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                    excludeBorderTouching,
+                    watershed,
+                    edgeDetector,
+                    measurements,
+                    labelsLut,
+                    false,
+                    false
+            );
+
+            // Stop-point state is intentionally kept outside the pipeline so the core
+            // image-processing code can stay mostly unaware of batch UI concerns.
+            stopController = new BatchStopController();
+            segmentationCache.clear();
+            thresholdConfigCache.clear();
+            ThresholdConfig sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
+            boolean thresholdStopDisabled = false;
+            boolean roiReviewDisabled = false;
+            boolean aborted = false;
+            int processedPairs = 0;
+            int failedPairs = 0;
+            int skippedPairs = 0;
+            final List<SegmentationParameterRow> parameterRows = new ArrayList<SegmentationParameterRow>();
+
+            pairLoop:
+            for (int i = 0; i < pairedUnits.size(); i++) {
+                final PairedUnit pair = pairedUnits.get(i);
+                final SegUnit seg = pair.getSegUnit();
+                final MeasUnit meas = pair.getMeasUnit();
+                final String pairBase = buildPairBaseName(pair, i);
+                final String segKey = buildSegUnitKey(seg);
+                final String segBase = buildSegmentationBaseName(seg);
+                final CachedSegmentationResult cachedSegmentation = segmentationCache.get(segKey);
+
+                // If a previous pairing already reviewed this exact RICM source, reuse
+                // that decision (continue/skip/abort plus any edited ROIs).
+                if (cachedSegmentation != null) {
+                    if (cachedSegmentation.isAbort()) {
+                        aborted = true;
+                        break;
+                    }
+                    if (cachedSegmentation.isSkip()) {
+                        skippedPairs++;
+                        IJ.log("[MechanoQuant Batch] Skip pair " + (i + 1) + " due to cached ROI skip: " + segKey);
+                        continue;
+                    }
+                }
+
+                ImagePlus segImp = null;
+                ImagePlus overlay = null;
+                MechanoQuantResult result = null;
+
+                try {
+                    IJ.showStatus("MechanoQuant batch pair " + (i + 1) + "/" + pairedUnits.size());
+                    IJ.showProgress(i, pairedUnits.size());
+
+                    IJ.log("[MechanoQuant Batch] Pair " + (i + 1) + "/" + pairedUnits.size()
+                            + " mode=" + mode.name()
+                            + " seg=" + seg.getSource().getName() + " S" + (seg.getSeriesIndex() + 1)
+                            + " C" + (seg.getSegChannelIndex() + 1)
+                            + " meas=" + meas.getSource().getName() + " S" + (meas.getSeriesIndex() + 1));
+
+                    CachedSegmentationResult finalSegmentation = cachedSegmentation;
+                    if (finalSegmentation == null) {
+                        // Load exactly one segmentation plane per unique RICM: series + channel, Z=0, T=0.
+                        segImp = reader.openPlane(seg.getSource(), seg.getSeriesIndex(), seg.getSegChannelIndex(), 0);
+                        boolean forceThresholdReview = false;
+                        ThresholdConfig pairThresholdConfig = null;
+                        while (true) {
+                            if (forceThresholdReview) {
+                                thresholdConfigCache.remove(segKey);
+                            }
+                            final boolean thresholdStopDisabledBeforeSelection = thresholdStopDisabled;
+                            final boolean stopForThreshold = shouldStopForThreshold(segKey, thresholdStopDisabled) || forceThresholdReview;
+                            final ThresholdSelection thresholdSelection = chooseThresholdConfig(
+                                    stopController,
+                                    segImp,
+                                    segKey,
+                                    sharedThresholdConfig,
+                                    stopForThreshold,
+                                    i + 1,
+                                    pairedUnits.size(),
+                                    seg);
+
+                            if (thresholdSelection.isAbort()) {
+                                aborted = true;
+                                IJ.log("[MechanoQuant Batch] Aborted by user during threshold selection: " + segKey);
+                                segmentationCache.put(segKey, CachedSegmentationResult.abort());
+                                break pairLoop;
+                            }
+                            if (thresholdSelection.isSkip()) {
+                                skippedPairs++;
+                                IJ.log("[MechanoQuant Batch] Skipping pair " + (i + 1) + " during threshold selection: " + segKey);
+                                segmentationCache.put(segKey, CachedSegmentationResult.skip());
+                                continue pairLoop;
+                            }
+
+                            pairThresholdConfig = thresholdSelection.getConfig();
+                            if (thresholdSelection.shouldRememberThreshold()) {
+                                sharedThresholdConfig = pairThresholdConfig;
+                            } else {
+                                sharedThresholdConfig = ThresholdConfig.auto(thrMethod, darkObjects);
+                            }
+                            if (thresholdSelection.isContinueToEnd()) {
+                                thresholdStopDisabled = true;
+                            }
+
+                            // Segmentation always runs before ROI review; ROI review can then
+                            // accept, modify, reject, or send the user back to thresholding.
+                            final ImagePlus preparedWork = thresholdSelection.getPreparedWork();
+                            result = preparedWork != null
+                                    ? MechanoQuantPipeline.completeSegmentation(preparedWork, segImp, p, pairThresholdConfig)
+                                    : MechanoQuantPipeline.run(segImp, p, pairThresholdConfig);
+
+                            final Roi[] proposedRois = result.roiManager != null ? cloneRois(result.roiManager.getRoisAsArray()) : new Roi[0];
+                            finalSegmentation = resolveSegmentationResult(
+                                    stopController,
+                                    segKey,
+                                    segImp,
+                                    proposedRois,
+                                    roiReviewDisabled,
+                                    i + 1,
+                                    pairedUnits.size(),
+                                    seg);
+                            if (finalSegmentation.isRedoThreshold()) {
+                                IJ.log("[MechanoQuant Batch] Redo thresholding requested during ROI review: " + segKey);
+                                closeImage(result.mask);
+                                closeImage(result.labels);
+                                result = null;
+                                thresholdStopDisabled = thresholdStopDisabledBeforeSelection;
+                                forceThresholdReview = true;
+                                continue;
+                            }
+                            break;
+                        }
+                        segmentationCache.put(segKey, finalSegmentation);
+                        if (saveParameters) {
+                            parameterRows.add(SegmentationParameterRow.from(
+                                    seg,
+                                    pairThresholdConfig,
+                                    edgeMethod,
+                                    minArea,
+                                    excludeBorderTouching,
+                                    finalSegmentation.action,
+                                    finalSegmentation.getRois() != null ? finalSegmentation.getRois().length : 0));
+                        }
+
+                        if (finalSegmentation.isAbort()) {
+                            aborted = true;
+                            IJ.log("[MechanoQuant Batch] Aborted by user during ROI review: " + segKey);
+                            break;
+                        }
+                        if (finalSegmentation.isSkip()) {
+                            skippedPairs++;
+                            IJ.log("[MechanoQuant Batch] Skipping pair " + (i + 1) + " after ROI review: " + segKey);
+                            continue;
+                        }
+                        if (finalSegmentation.isContinueToEnd()) {
+                            roiReviewDisabled = true;
+                        }
+
+                        saveSegmentationOutputs(segImp, segBase, finalSegmentation.getRois());
+                    }
+
+                    final Roi[] finalRois = finalSegmentation.getRois();
+
+                    if (saveMeasurements) {
+                        final SeriesMetadata measMeta = reader.getSeriesMetadata(meas.getSource(), meas.getSeriesIndex());
+                        final List<FrameSpec> frames = MeasurementPlan.planFrames(meas, measMeta);
+                        final boolean singleFrame = frames.size() == 1;
+
+                        for (FrameSpec frame : frames) {
+                            ImagePlus measImp = null;
+                            try {
+                                IJ.log("[MechanoQuant Batch] Measure pair=" + (i + 1)
+                                        + " file=" + meas.getSource().getName()
+                                        + " S" + (meas.getSeriesIndex() + 1)
+                                        + " C" + (frame.getChannelIndex() + 1)
+                                        + " T" + (frame.getTimeIndex() + 1));
+
+                                measImp = reader.openPlane(
+                                        meas.getSource(),
+                                        meas.getSeriesIndex(),
+                                        frame.getChannelIndex(),
+                                        frame.getTimeIndex());
+
+                                // Measurements always use the final accepted ROI set,
+                                // including any edits cached from a prior shared RICM.
+                                final ResultsTable measured = measureRoisOnImage(finalRois, measImp, measurements);
+                                final String frameSuffix = singleFrame
+                                        ? "_measurements.csv"
+                                        : "_C" + (frame.getChannelIndex() + 1)
+                                        + "_T" + (frame.getTimeIndex() + 1) + "_measurements.csv";
+                                measured.save(new File(outputDir, pairBase + frameSuffix).getAbsolutePath());
+                            } catch (Exception frameEx) {
+                                throw new RuntimeException("Measurement failed for file=" + meas.getSource().getName()
+                                        + " series=" + (meas.getSeriesIndex() + 1)
+                                        + " channel=" + (frame.getChannelIndex() + 1)
+                                        + " time=" + (frame.getTimeIndex() + 1), frameEx);
+                            } finally {
+                                closeImage(measImp);
+                            }
+                        }
+                    }
+
+                    processedPairs++;
+
+                } catch (Exception pairEx) {
+                    failedPairs++;
+                    IJ.log("[MechanoQuant Batch] ERROR pair " + (i + 1) + ": " + pairEx.getMessage());
+                    IJ.handleException(pairEx);
+                } finally {
+                    closeImage(overlay);
+                    closeImage(result != null ? result.mask : null);
+                    closeImage(result != null ? result.labels : null);
+                    closeImage(segImp);
+                }
+            }
+
+            IJ.showProgress(1.0);
+            IJ.showStatus(aborted ? "Batch MechanoQuant aborted." : "Batch MechanoQuant complete.");
+            if (saveParameters && !parameterRows.isEmpty()) {
+                try {
+                    saveParameterRows(parameterRows, new File(outputDir, "segmentation_parameters.csv"));
+                } catch (Exception e) {
+                    IJ.log("[MechanoQuant Batch] ERROR saving segmentation parameters: " + e.getMessage());
+                    IJ.handleException(e);
+                }
+            }
+            IJ.log("[MechanoQuant Batch] Done. processedPairs=" + processedPairs
+                    + " failedPairs=" + failedPairs
+                    + " skippedPairs=" + skippedPairs
+                    + " aborted=" + aborted);
+        } finally {
+            if (stopController != null) {
+                stopController.dispose();
+            }
+            Prefs.blackBackground = prevBlackBg;
+        }
+    }
+
+    private static List<PairedUnit> normalizeMeasurementChannels(
+            List<PairedUnit> pairs,
+            InputMode mode,
+            BioFormatsPlaneReader reader) {
+
+        // File-list fluorescence mode initially leaves measurement channels unspecified.
+        // After we read file metadata, expand that into "all channels" so downstream
+        // code is uniform.
+        if (mode != InputMode.FILE_LIST_PAIR) {
+            return pairs;
+        }
+
+        final List<PairedUnit> out = new ArrayList<PairedUnit>();
+        for (PairedUnit pair : pairs) {
+            try {
+                final MeasUnit meas = pair.getMeasUnit();
+                final SeriesMetadata md = reader.getSeriesMetadata(meas.getSource(), meas.getSeriesIndex());
+                final int sizeC = Math.max(1, md.getSizeC());
+                final int[] channels = new int[sizeC];
+                for (int c = 0; c < sizeC; c++) channels[c] = c;
+
+                out.add(new PairedUnit(
+                        pair.getSegUnit(),
+                        new MeasUnit(meas.getSource(), meas.getSeriesIndex(), channels, meas.isAllTimepoints())
+                ));
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Failed to read fluorescence channel metadata for "
+                        + pair.getMeasUnit().getSource().getName() + ": " + e.getMessage(), e);
+            }
+        }
+
+        return out;
+    }
+
+    private static void validatePairsOrThrow(List<PairedUnit> pairs, BioFormatsPlaneReader reader) throws Exception {
+        // Batch work is easier to reason about if we fail fast before any output files
+        // are written, so pair compatibility is checked up front.
+        for (int i = 0; i < pairs.size(); i++) {
+            final PairedUnit pair = pairs.get(i);
+            final SegUnit seg = pair.getSegUnit();
+            final MeasUnit meas = pair.getMeasUnit();
+
+            final SeriesMetadata segMeta = reader.getSeriesMetadata(seg.getSource(), seg.getSeriesIndex());
+            final SeriesMetadata measMeta = reader.getSeriesMetadata(meas.getSource(), meas.getSeriesIndex());
+
+            if (seg.getSegChannelIndex() < 0 || seg.getSegChannelIndex() >= Math.max(1, segMeta.getSizeC())) {
+                throw new IllegalArgumentException("Segmentation channel out of range at pair " + (i + 1)
+                        + " for file " + seg.getSource().getName()
+                        + " series " + (seg.getSeriesIndex() + 1)
+                        + ": C" + (seg.getSegChannelIndex() + 1)
+                        + " but sizeC=" + segMeta.getSizeC());
+            }
+
+            final List<FrameSpec> frames = MeasurementPlan.planFrames(meas, measMeta);
+            if (frames.isEmpty()) {
+                throw new IllegalArgumentException("No measurement frames at pair " + (i + 1));
+            }
+
+            if (segMeta.getSizeX() != measMeta.getSizeX() || segMeta.getSizeY() != measMeta.getSizeY()) {
+                throw new IllegalArgumentException("XY size mismatch at pair " + (i + 1)
+                        + ". seg=" + seg.getSource().getName() + "(S" + (seg.getSeriesIndex() + 1)
+                        + ", " + segMeta.getSizeX() + "x" + segMeta.getSizeY() + ")"
+                        + " vs meas=" + meas.getSource().getName() + "(S" + (meas.getSeriesIndex() + 1)
+                        + ", " + measMeta.getSizeX() + "x" + measMeta.getSizeY() + ")");
+            }
+        }
+    }
+
+    private static ResultsTable measureRoisOnImage(Roi[] rois, ImagePlus image, int measurements) {
+        final ResultsTable rt = new ResultsTable();
+        if (image == null) {
+            return rt;
+        }
+
+        // Analyzer measures whichever ROI is currently set on the image, so we replay
+        // the ROI array one-by-one against a fresh table.
+        final Analyzer analyzer = new Analyzer(image, measurements, rt);
+        final Roi[] safeRois = rois != null ? rois : new Roi[0];
+        for (Roi roi : safeRois) {
+            if (roi == null) {
+                continue;
+            }
+            image.setRoi(roi);
+            analyzer.measure();
+        }
+        image.deleteRoi();
+        return rt;
+    }
+
+    private String buildPairBaseName(PairedUnit pair, int pairIndex0) {
+        final SegUnit seg = pair.getSegUnit();
+        final MeasUnit meas = pair.getMeasUnit();
+
+        final String segBase = MechanoQuantIO.stripExtension(seg.getSource().getName());
+        final String measBase = MechanoQuantIO.stripExtension(meas.getSource().getName());
+        final String segSeries = "S" + (seg.getSeriesIndex() + 1);
+        final String measSeries = "S" + (meas.getSeriesIndex() + 1);
+
+        if (seg.getSource().equals(meas.getSource()) && seg.getSeriesIndex() == meas.getSeriesIndex()) {
+            return segBase + "_" + segSeries;
+        }
+        return "pair" + (pairIndex0 + 1) + "_" + segBase + "_" + segSeries + "__" + measBase + "_" + measSeries;
+    }
+
+    private void applyOptions(BatchSegmentationDialog.Result options) {
+        inputMode = indexToInputModeName(options.inputModeIndex);
+        sameFileSegChannelIndex1Based = options.sameFileSegChannelIndex1Based;
+        ricmContainerFile = options.ricmContainerFile;
+        fluorContainerFile = options.fluorContainerFile;
+        ricmFiles = cloneFiles(options.ricmFiles);
+        fluorFiles = cloneFiles(options.fluorFiles);
+        combinedFiles = cloneFiles(options.combinedFiles);
+        minArea = options.minArea;
+        thrMethod = options.thrMethod;
+        darkObjects = options.darkObjects;
+        edgeMethod = options.edgeMethod;
+        excludeBorderTouching = options.excludeBorderTouching;
+        watershed = options.watershed;
+        thresholdStopMode = options.thresholdStopMode;
+        roiReviewMode = options.roiReviewMode;
+        measureArea = options.measureArea;
+        measureMean = options.measureMean;
+        measureMinMax = options.measureMinMax;
+        measureStdDev = options.measureStdDev;
+        measurePerimeter = options.measurePerimeter;
+        measureCentroid = options.measureCentroid;
+        measureRect = options.measureRect;
+        measureFeret = options.measureFeret;
+        measureShape = options.measureShape;
+        measureIntDen = options.measureIntDen;
+        outputDir = options.outputDir;
+        labelsLut = options.labelsLut;
+        saveMask = options.saveMask;
+        saveLabels = options.saveLabels;
+        saveLabelOverlay = options.saveLabelOverlay;
+        saveRois = options.saveRois;
+        saveMeasurements = options.saveMeasurements;
+        saveParameters = options.saveParameters;
+    }
+
+    private static int inputModeToIndex(String modeName) {
+        if (modeName == null) {
+            return 0;
+        }
+        if (InputMode.RICM_CONTAINER_SERIES.name().equalsIgnoreCase(modeName)) {
+            return 1;
+        }
+        if (InputMode.FILE_LIST_PAIR.name().equalsIgnoreCase(modeName)) {
+            return 3;
+        }
+        if (InputMode.SAME_FILE_CHANNELS.name().equalsIgnoreCase(modeName)) {
+            return 4;
+        }
+        if (InputMode.CONTAINER_SERIES_PAIR.name().equalsIgnoreCase(modeName)) {
+            return 2;
+        }
+        return 0;
+    }
+
+    private static String indexToInputModeName(int index) {
+        switch (index) {
+            case 1:
+                return InputMode.RICM_CONTAINER_SERIES.name();
+            case 2:
+                return InputMode.CONTAINER_SERIES_PAIR.name();
+            case 3:
+                return InputMode.FILE_LIST_PAIR.name();
+            case 4:
+                return InputMode.SAME_FILE_CHANNELS.name();
+            case 0:
+            default:
+                return InputMode.RICM_FILE_LIST.name();
+        }
+    }
+
+    private static File[] cloneFiles(File[] files) {
+        if (files == null || files.length == 0) {
+            return null;
+        }
+        final File[] cloned = new File[files.length];
+        System.arraycopy(files, 0, cloned, 0, files.length);
+        return cloned;
+    }
+
+    private int buildMeasurementFlags() {
+        int meas = 0;
+        if (measureArea) meas |= ij.measure.Measurements.AREA;
+        if (measureMean) meas |= ij.measure.Measurements.MEAN;
+        if (measureMinMax) meas |= ij.measure.Measurements.MIN_MAX;
+        if (measureStdDev) meas |= ij.measure.Measurements.STD_DEV;
+        if (measurePerimeter) meas |= ij.measure.Measurements.PERIMETER;
+        if (measureCentroid) meas |= ij.measure.Measurements.CENTROID;
+        if (measureRect) meas |= ij.measure.Measurements.RECT;
+        if (measureFeret) meas |= ij.measure.Measurements.FERET;
+        if (measureShape) meas |= ij.measure.Measurements.SHAPE_DESCRIPTORS;
+        if (measureIntDen) meas |= ij.measure.Measurements.INTEGRATED_DENSITY;
+        return meas;
+    }
+
+    private static void saveImage(ImagePlus imp, File out) {
+        if (imp == null || out == null) return;
+        MechanoQuantIO.saveImage(imp, out);
+    }
+
+    private static void saveRois(Roi[] rois, File out) {
+        MechanoQuantIO.saveRois(rois, out);
+    }
+
+    private static void saveParameterRows(List<SegmentationParameterRow> rows, File out) throws Exception {
+        final PrintWriter writer = new PrintWriter(out, "UTF-8");
+        try {
+            writer.println("source_path,source_file,series_index_1based,seg_channel_index_1based,threshold_mode,threshold_method,dark_objects,threshold_min,threshold_max,edge_method,min_area_px,exclude_border_touching,roi_review_action,accepted_roi_count");
+            for (SegmentationParameterRow row : rows) {
+                writer.println(row.toCsv());
+            }
+        } finally {
+            writer.close();
+        }
+    }
+
+    private static void closeImage(ImagePlus imp) {
+        if (imp == null) return;
+        if (imp.getWindow() != null && !SwingUtilities.isEventDispatchThread()) {
+            final ImagePlus visibleImp = imp;
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    visibleImp.changes = false;
+                    visibleImp.close();
+                }
+            });
+            return;
+        }
+        imp.changes = false;
+        imp.close();
+    }
+
+    private boolean shouldStopForThreshold(String segKey, boolean thresholdStopDisabled) {
+        if (thresholdStopDisabled) {
+            return false;
+        }
+        // "Once per unique RICM" means one stop per segmentation source key, not per
+        // measurement pairing that happens to reference that same source.
+        if (THRESHOLD_STOP_UNIQUE.equals(thresholdStopMode)) {
+            return !thresholdConfigCache.containsKey(segKey);
+        }
+        return false;
+    }
+
+    private boolean isThresholdStopUnique() {
+        return THRESHOLD_STOP_UNIQUE.equals(thresholdStopMode);
+    }
+
+    private boolean isRoiReviewEnabled() {
+        return ROI_REVIEW_ONCE.equals(roiReviewMode);
+    }
+
+    private ThresholdSelection chooseThresholdConfig(
+            BatchStopController stopController,
+            ImagePlus segImp,
+            String segKey,
+            ThresholdConfig currentConfig,
+            boolean shouldStop,
+            int pairIndex1,
+            int totalPairs,
+            SegUnit seg) {
+
+        if (isThresholdStopUnique()) {
+            final ThresholdConfig cachedConfig = thresholdConfigCache.get(segKey);
+            if (cachedConfig != null) {
+                // Reuse the exact threshold config chosen for this SegUnit earlier.
+                return ThresholdSelection.continueWith(cachedConfig, false, false, null);
+            }
+        }
+
+        if (!shouldStop) {
+            return ThresholdSelection.continueWith(currentConfig, false, false, null);
+        }
+
+        final ImagePlus preview = MechanoQuantPipeline.prepareThresholdPreview(segImp, EdgeDetector.fromLabel(edgeMethod), true);
+        try {
+            preview.setTitle(buildThresholdImageTitle(pairIndex1, totalPairs, seg));
+            final BatchStopController.ThresholdSelectionResult selected = stopController.maybeSelectThreshold(
+                    context,
+                    preview,
+                    currentConfig,
+                    buildThresholdTitle(pairIndex1, totalPairs, seg));
+            if (!selected.isContinue()) {
+                closeImage(preview);
+                return ThresholdSelection.from(selected);
+            }
+            final ThresholdConfig selectedConfig = selected.getConfig();
+            if (isThresholdStopUnique()) {
+                thresholdConfigCache.put(segKey, selectedConfig);
+            }
+            return ThresholdSelection.continueWith(
+                    selectedConfig,
+                    selected.shouldRememberThreshold(),
+                    selected.isContinueToEnd(),
+                    preview);
+        } catch (RuntimeException e) {
+            closeImage(preview);
+            throw e;
+        }
+    }
+
+    private CachedSegmentationResult resolveSegmentationResult(
+            BatchStopController stopController,
+            String segKey,
+            ImagePlus segImp,
+            Roi[] proposedRois,
+            boolean roiReviewDisabled,
+            int pairIndex1,
+            int totalPairs,
+            SegUnit seg) {
+
+        if (!isRoiReviewEnabled() || roiReviewDisabled) {
+            return CachedSegmentationResult.continueWith(proposedRois);
+        }
+
+        final BatchStopController.RoiReviewResult reviewed = RoiReviewEditor.review(
+                segImp,
+                proposedRois,
+                minArea,
+                buildRoiReviewTitle(pairIndex1, totalPairs, seg));
+        if (reviewed.isAbort()) {
+            return CachedSegmentationResult.abort();
+        }
+        if (reviewed.isRedoThreshold()) {
+            return CachedSegmentationResult.redoThreshold();
+        }
+        if (reviewed.isSkip()) {
+            return CachedSegmentationResult.skip();
+        }
+        if (reviewed.isContinueToEnd()) {
+            return CachedSegmentationResult.continueToEnd(reviewed.getRois());
+        }
+        return CachedSegmentationResult.continueWith(reviewed.getRois());
+    }
+
+    private void saveSegmentationOutputs(ImagePlus segImp, String segBase, Roi[] finalRois) {
+        if ((!saveMask && !saveLabels && !saveLabelOverlay && !saveRois) || segImp == null) {
+            return;
+        }
+
+        ImagePlus outputMask = null;
+        ImagePlus outputLabels = null;
+        ImagePlus outputOverlay = null;
+        try {
+            if (saveMask || saveLabelOverlay) {
+                outputMask = MechanoQuantPipeline.buildMaskFromRois(finalRois, segImp.getWidth(), segImp.getHeight());
+            }
+            if (saveLabels || saveLabelOverlay) {
+                outputLabels = MechanoQuantPipeline.buildLabelsFromRois(finalRois, segImp.getWidth(), segImp.getHeight(), labelsLut);
+            }
+            if (saveMask && outputMask != null) {
+                saveImage(outputMask, new File(outputDir, segBase + "_mask.tif"));
+            }
+            if (saveLabels && outputLabels != null) {
+                saveImage(outputLabels, new File(outputDir, segBase + "_labels.tif"));
+            }
+            if (saveLabelOverlay && outputLabels != null) {
+                outputOverlay = MechanoQuantPipeline.createLabelOverlay(segImp, outputLabels, labelsLut);
+                if (outputOverlay != null) {
+                    saveImage(outputOverlay, new File(outputDir, segBase + "_overlay.tif"));
+                }
+            }
+            if (saveRois) {
+                saveRois(finalRois, new File(outputDir, segBase + "_rois.zip"));
+            }
+        } finally {
+            closeImage(outputOverlay);
+            closeImage(outputLabels);
+            closeImage(outputMask);
+        }
+    }
+
+    private static String buildSegUnitKey(SegUnit seg) {
+        return seg.getSource().getAbsolutePath()
+                + "|s=" + seg.getSeriesIndex()
+                + "|c=" + seg.getSegChannelIndex();
+    }
+
+    private static String buildSegmentationBaseName(SegUnit seg) {
+        return MechanoQuantIO.stripExtension(seg.getSource().getName())
+                + "_S" + (seg.getSeriesIndex() + 1)
+                + "_C" + (seg.getSegChannelIndex() + 1);
+    }
+
+    private static String buildThresholdTitle(int pairIndex1, int totalPairs, SegUnit seg) {
+        return "Threshold Selection (RICM " + pairIndex1 + "/" + totalPairs + "): "
+                + seg.getSource().getName() + " [series " + (seg.getSeriesIndex() + 1) + "]";
+    }
+
+    private static String buildThresholdImageTitle(int pairIndex1, int totalPairs, SegUnit seg) {
+        return "Threshold Preview (RICM " + pairIndex1 + "/" + totalPairs + "): "
+                + seg.getSource().getName() + " [S" + (seg.getSeriesIndex() + 1)
+                + ", C" + (seg.getSegChannelIndex() + 1) + "]";
+    }
+
+    private static String buildRoiReviewTitle(int pairIndex1, int totalPairs, SegUnit seg) {
+        return "ROI Review (RICM " + pairIndex1 + "/" + totalPairs + "): "
+                + seg.getSource().getName() + " [series " + (seg.getSeriesIndex() + 1) + "]";
+    }
+
+    private static Roi[] cloneRois(Roi[] rois) {
+        if (rois == null || rois.length == 0) {
+            return new Roi[0];
+        }
+        final Roi[] cloned = new Roi[rois.length];
+        for (int i = 0; i < rois.length; i++) {
+            cloned[i] = rois[i] != null ? (Roi) rois[i].clone() : null;
+        }
+        return cloned;
+    }
+
+    private static final class CachedSegmentationResult {
+        private final BatchStopController.RoiReviewAction action;
+        private final Roi[] rois;
+
+        private CachedSegmentationResult(BatchStopController.RoiReviewAction action, Roi[] rois) {
+            this.action = action;
+            this.rois = cloneRois(rois);
+        }
+
+        private static CachedSegmentationResult continueWith(Roi[] rois) {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.CONTINUE, rois);
+        }
+
+        private static CachedSegmentationResult continueToEnd(Roi[] rois) {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.CONTINUE_TO_END, rois);
+        }
+
+        private static CachedSegmentationResult skip() {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.SKIP, null);
+        }
+
+        private static CachedSegmentationResult abort() {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.ABORT, null);
+        }
+
+        private static CachedSegmentationResult redoThreshold() {
+            return new CachedSegmentationResult(BatchStopController.RoiReviewAction.REDO_THRESHOLD, null);
+        }
+
+        private boolean isSkip() {
+            return action == BatchStopController.RoiReviewAction.SKIP;
+        }
+
+        private boolean isAbort() {
+            return action == BatchStopController.RoiReviewAction.ABORT;
+        }
+
+        private boolean isRedoThreshold() {
+            return action == BatchStopController.RoiReviewAction.REDO_THRESHOLD;
+        }
+
+        private boolean isContinueToEnd() {
+            return action == BatchStopController.RoiReviewAction.CONTINUE_TO_END;
+        }
+
+        private Roi[] getRois() {
+            return cloneRois(rois);
+        }
+    }
+
+    private static final class ThresholdSelection {
+        private final BatchStopController.RoiReviewAction action;
+        private final ThresholdConfig config;
+        private final boolean rememberThreshold;
+        private final boolean continueToEnd;
+        private final ImagePlus preparedWork;
+
+        private ThresholdSelection(
+                BatchStopController.RoiReviewAction action,
+                ThresholdConfig config,
+                boolean rememberThreshold,
+                boolean continueToEnd,
+                ImagePlus preparedWork) {
+            this.action = action;
+            this.config = config;
+            this.rememberThreshold = rememberThreshold;
+            this.continueToEnd = continueToEnd;
+            this.preparedWork = preparedWork;
+        }
+
+        private static ThresholdSelection continueWith(
+                ThresholdConfig config,
+                boolean rememberThreshold,
+                boolean continueToEnd,
+                ImagePlus preparedWork) {
+            return new ThresholdSelection(
+                    continueToEnd ? BatchStopController.RoiReviewAction.CONTINUE_TO_END : BatchStopController.RoiReviewAction.CONTINUE,
+                    config,
+                    rememberThreshold,
+                    continueToEnd,
+                    preparedWork);
+        }
+
+        private static ThresholdSelection from(BatchStopController.ThresholdSelectionResult result) {
+            return new ThresholdSelection(
+                    result.getAction(),
+                    result.getConfig(),
+                    result.shouldRememberThreshold(),
+                    result.isContinueToEnd(),
+                    null);
+        }
+
+        private boolean isSkip() {
+            return action == BatchStopController.RoiReviewAction.SKIP;
+        }
+
+        private boolean isAbort() {
+            return action == BatchStopController.RoiReviewAction.ABORT;
+        }
+
+        private boolean isContinueToEnd() {
+            return continueToEnd;
+        }
+
+        private ThresholdConfig getConfig() {
+            return config;
+        }
+
+        private boolean shouldRememberThreshold() {
+            return rememberThreshold;
+        }
+
+        private ImagePlus getPreparedWork() {
+            return preparedWork;
+        }
+    }
+
+    private static final class SegmentationParameterRow {
+        private final String sourcePath;
+        private final String sourceFile;
+        private final int seriesIndex1Based;
+        private final int segChannelIndex1Based;
+        private final String thresholdMode;
+        private final String thresholdMethod;
+        private final boolean darkObjects;
+        private final String thresholdMin;
+        private final String thresholdMax;
+        private final String edgeMethod;
+        private final int minArea;
+        private final boolean excludeBorderTouching;
+        private final String roiReviewAction;
+        private final int acceptedRoiCount;
+
+        private SegmentationParameterRow(
+                String sourcePath,
+                String sourceFile,
+                int seriesIndex1Based,
+                int segChannelIndex1Based,
+                String thresholdMode,
+                String thresholdMethod,
+                boolean darkObjects,
+                String thresholdMin,
+                String thresholdMax,
+                String edgeMethod,
+                int minArea,
+                boolean excludeBorderTouching,
+                String roiReviewAction,
+                int acceptedRoiCount) {
+            this.sourcePath = sourcePath;
+            this.sourceFile = sourceFile;
+            this.seriesIndex1Based = seriesIndex1Based;
+            this.segChannelIndex1Based = segChannelIndex1Based;
+            this.thresholdMode = thresholdMode;
+            this.thresholdMethod = thresholdMethod;
+            this.darkObjects = darkObjects;
+            this.thresholdMin = thresholdMin;
+            this.thresholdMax = thresholdMax;
+            this.edgeMethod = edgeMethod;
+            this.minArea = minArea;
+            this.excludeBorderTouching = excludeBorderTouching;
+            this.roiReviewAction = roiReviewAction;
+            this.acceptedRoiCount = acceptedRoiCount;
+        }
+
+        private static SegmentationParameterRow from(
+                SegUnit seg,
+                ThresholdConfig thresholdConfig,
+                String edgeMethod,
+                int minArea,
+                boolean excludeBorderTouching,
+                BatchStopController.RoiReviewAction roiReviewAction,
+                int acceptedRoiCount) {
+            final ThresholdConfig cfg = thresholdConfig != null ? thresholdConfig : ThresholdConfig.auto("Default", true);
+            return new SegmentationParameterRow(
+                    seg.getSource().getAbsolutePath(),
+                    seg.getSource().getName(),
+                    seg.getSeriesIndex() + 1,
+                    seg.getSegChannelIndex() + 1,
+                    cfg.isManual() ? "manual" : "auto",
+                    cfg.getMethod(),
+                    cfg.isDarkObjects(),
+                    cfg.isManual() ? Double.toString(cfg.getMinThreshold()) : "",
+                    cfg.isManual() ? Double.toString(cfg.getMaxThreshold()) : "",
+                    edgeMethod,
+                    minArea,
+                    excludeBorderTouching,
+                    roiReviewAction != null ? roiReviewAction.name() : "",
+                    acceptedRoiCount);
+        }
+
+        private String toCsv() {
+            return csv(sourcePath) + ","
+                    + csv(sourceFile) + ","
+                    + seriesIndex1Based + ","
+                    + segChannelIndex1Based + ","
+                    + csv(thresholdMode) + ","
+                    + csv(thresholdMethod) + ","
+                    + darkObjects + ","
+                    + csv(thresholdMin) + ","
+                    + csv(thresholdMax) + ","
+                    + csv(edgeMethod) + ","
+                    + minArea + ","
+                    + excludeBorderTouching + ","
+                    + csv(roiReviewAction) + ","
+                    + acceptedRoiCount;
+        }
+
+        private static String csv(String value) {
+            final String safe = value != null ? value : "";
+            return "\"" + safe.replace("\"", "\"\"") + "\"";
+        }
+    }
+}
