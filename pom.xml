@@ -13,7 +13,7 @@
 
 	<groupId>com.will.mechanoquant</groupId>
 	<artifactId>mechano-quant</artifactId>
-	<version>0.6.0</version>
+	<version>0.7.0-SNAPSHOT</version>
 
 	<name>MechanoQuant</name>
 	<description>MechanoQuant is a Fiji/ImageJ plugin for segmenting cells in RICM images and measuring the resulting regions in source or paired images. It supports individual images, stacks, and batch workflows, with optional interactive threshold and ROI review.</description>
