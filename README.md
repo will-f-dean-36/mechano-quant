@@ -1,6 +1,6 @@
 # MechanoQuant
 
-![Version](https://img.shields.io/badge/version-0.6.0--SNAPSHOT-green)
+![Version](https://img.shields.io/badge/version-0.6.0-green)
 
 MechanoQuant is a Fiji/ImageJ plugin for segmenting cells in RICM images and measuring the resulting regions in source or paired images. It supports individual images, stacks, and batch workflows, with optional interactive threshold and ROI review.
 
